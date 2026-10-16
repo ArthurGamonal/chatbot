@@ -1,0 +1,11 @@
+# Salve este arquivo como .streamlit/config.toml na raiz do projeto
+[theme]
+base = "light"
+primaryColor = "#1c1c1e"            # Ink Black: botões primários e foco (verde fica só nos acentos)
+backgroundColor = "#ffffff"         # Pure White: canvas
+secondaryBackgroundColor = "#eff1f6" # Mist Gray: único tom de card
+textColor = "#1c1c1e"
+font = "sans serif"
+
+[server]
+enableStaticServing = true  # permite servir arquivos da pasta static/ (ex.: o GIF)
