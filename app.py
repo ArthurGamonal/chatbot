@@ -1,10 +1,13 @@
 import base64
 import contextlib
 import hmac
+import io
 import json
 import os
+import re
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import altair as alt
@@ -32,8 +35,8 @@ BUBBLES = ["Olá, eu sou o Zids.", "O que você quer saber sobre preços?"]
 # Substitua pelos seus números reais
 STATS = [
     ("Medicamentos", "10.000+", "no banco de dados"),
-    ("Tempo de resposta", "2 s", "em média por pergunta"),
-    ("Satisfação", "90%", "das conversas avaliadas"),
+    ("Tempo de resposta", "6 s", "em média por pergunta"),
+    ("Extração completa", "17", "campos por medicamento (15 na VeraCruz)"),
 ]
 SUGGESTIONS = [
     "Qual o preço médio da dipirona na FarmaPonte?",
@@ -51,7 +54,7 @@ DARK = bool(st.session_state.dark)
 INK = "#f2f0f7" if DARK else "#1c1c1e"
 MUTED = "#a9a4b8" if DARK else "#676768"
 GRID = "#2f2640" if DARK else "#eff1f6"
-SURFACE = "#1c1528" if DARK else "#ffffff"
+SURFACE = "#1c1528" if DARK else "#faf8f5"
 
 # ---------- Estilo (tokens do Grove AI) ----------
 st.markdown(
@@ -118,7 +121,7 @@ st.markdown(
   --shadow-subtle-4: rgba(255, 255, 255, 0.75) 0px 1px 2px 0px inset;
 
   /* Surfaces */
-  --surface-canvas: #ffffff;
+  --surface-canvas: #faf8f5;
   --surface-card: #eff1f6;
   --surface-inverted-dark: #231a33;
   --surface-brand-accent: var(--color-brand);
@@ -219,9 +222,21 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .stButton > button[kind="primary"]:hover, .stButton > button[data-testid="stBaseButton-primary"]:hover { background: var(--color-graphite); }
 [data-testid="stVerticalBlockBorderWrapper"] { border-radius: var(--radius-cards); }
 
-/* Carregamento (GIF do dado, centralizado, no lugar do texto) */
-.g-loading { display: flex; justify-content: center; align-items: center; width: 100%; padding: var(--spacing-16) 0; }
-.g-loading img { height: 72px; width: auto; max-width: 100%; object-fit: contain; display: block; }
+/* Carregamento: frase "Pensando..." centralizada */
+.g-loading { display: flex; justify-content: center; align-items: center; width: 100%; padding: var(--spacing-24) 0; }
+.g-pensando { font-size: var(--text-body); letter-spacing: var(--tracking-body); color: var(--color-slate-mid);
+  animation: g-pulso 1.4s ease-in-out infinite; }
+@keyframes g-pulso { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+
+/* Botão "Baixar PDF" no mesmo estilo dos botões escuros */
+[data-testid="stDownloadButton"] button {
+  border-radius: var(--radius-buttons); padding: var(--spacing-12) var(--spacing-24);
+  background: var(--color-ink-black); border: 1px solid var(--color-ink-black);
+  box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4);
+}
+[data-testid="stDownloadButton"] button p {
+  color: var(--color-pure-white); font-size: var(--text-body-sm); font-weight: var(--font-weight-medium);
+}
 
 /* Chat */
 [data-testid="stChatMessage"] {
@@ -326,11 +341,10 @@ def load_logo(nome: str = "logo_farmazids.png") -> str:
 
 @contextlib.contextmanager
 def carregando(texto: str = "Consultando os dados..."):
-    """Mostra só o GIF do dado, centralizado, enquanto a busca roda (no lugar do st.spinner)."""
+    """Mostra a frase "Pensando..." (centralizada) enquanto a busca roda, no lugar do st.spinner."""
     espaco = st.empty()
     espaco.markdown(
-        f'<div class="g-loading" role="status" aria-label="{texto}">'
-        f'<img src="app/static/LOADING.gif" alt="{texto}"></div>',
+        f'<div class="g-loading" role="status" aria-label="{texto}"><span class="g-pensando">Pensando...</span></div>',
         unsafe_allow_html=True,
     )
     try:
@@ -515,9 +529,20 @@ def parse_output(output: str) -> dict:
     }
 
 
-def generate_reply(pergunta: str) -> dict:
-    # O primeiro estado da state machine (Iniciar) lê somente $.pergunta
-    payload = {"pergunta": pergunta}
+def montar_historico(mensagens: list, max_turnos: int = 3, max_resp: int = 350, max_sql: int = 1200) -> str:
+    """Resume as últimas trocas do chat (pergunta, trecho da resposta e SQL) para a memória da conversa."""
+    turnos = [m for m in mensagens if m.get("role") == "assistant" and m.get("pergunta") and m.get("sql")]
+    partes = []
+    for n, m in enumerate(turnos[-max_turnos:], 1):
+        resposta = " ".join(str(m.get("content", "")).split())[:max_resp]
+        sql = " ".join(str(m["sql"]).split())[:max_sql]
+        partes.append(f"[{n}] Pergunta: {m['pergunta']}\nResposta (trecho): {resposta}\nSQL: {sql}")
+    return "\n\n".join(partes)
+
+
+def generate_reply(pergunta: str, historico: str = "") -> dict:
+    # A state machine lê $.pergunta e $.historico (texto com as últimas trocas; vazio = sem memória)
+    payload = {"pergunta": pergunta, "historico": historico}
     sfn = get_sfn()
     try:
         if get_state_machine_type() == "EXPRESS":
@@ -626,8 +651,13 @@ def build_chart(df: pd.DataFrame, pergunta: str):
     )
 
 
+def md_seguro(texto) -> str:
+    """Escapa o cifrão: o Streamlit trata $...$ como fórmula e quebra textos com dois 'R$' no mesmo parágrafo."""
+    return str(texto or "").replace("\\$", "$").replace("$", "\\$")
+
+
 def render_message(m: dict):
-    st.markdown(m["content"])
+    st.markdown(md_seguro(m["content"]))
     df = rows_to_df(m.get("rows") or []) if m.get("sql") else None
     if m.get("chart"):
         chart = build_chart(df, m.get("pergunta", "")) if df is not None else None
@@ -927,6 +957,227 @@ def render_tabela(bruto: pd.DataFrame, spec: dict) -> bool:
     return True
 
 
+# ---------- PDF dos insights (para apresentar em reuniões) ----------
+# Gráficos desenhados com matplotlib e documento montado com reportlab. Sempre em tema claro,
+# mesmo que o site esteja no modo escuro. Instale: py -m pip install reportlab matplotlib
+def _pdf_texto(t) -> str:
+    """Texto simples (sem markdown) e só com caracteres que a fonte padrão do PDF suporta."""
+    t = str(t or "").replace("**", "").replace("`", "")
+    t = re.sub(r"^\s*#+\s*", "", t, flags=re.M)
+    t = re.sub(r"^\s*[-*]\s+", "• ", t, flags=re.M)
+    for de, para in {"≥": ">=", "≤": "<=", "→": "->", "←": "<-", "−": "-", "\u00a0": " ", "\u202f": " ", "≈": "~"}.items():
+        t = t.replace(de, para)
+    return t.encode("cp1252", "replace").decode("cp1252")
+
+
+def grafico_pdf(d: pd.DataFrame, spec: dict) -> bytes:
+    """Desenha o gráfico do indicador em PNG (fundo branco) usando as mesmas cores do site."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    roxo, ouro, tinta, mudo, grade = "#6d3fc0", "#c4a054", "#1c1c1e", "#676768", "#e6e3ee"
+    tipo, eixo = spec["tipo"], spec.get("eixo", "")
+    esc = lambda x: str(x).replace("$", r"\$")  # matplotlib trata $...$ como fórmula
+    cortar = lambda x, n=44: (str(x)[: n - 1] + "…") if len(str(x)) > n else str(x)
+
+    def barras(ax, sub, cor, xlim):
+        sub = sub.reset_index(drop=True)
+        ax.barh(range(len(sub)), sub["valor"], color=[cor(v) for v in sub["valor"]], height=0.62)
+        ax.set_yticks(range(len(sub)))
+        ax.set_yticklabels([esc(cortar(x)) for x in sub["rotulo"]])
+        ax.invert_yaxis()
+        for i, (v, t) in enumerate(zip(sub["valor"], sub["texto"])):
+            ax.text(v, i, ("  " if v >= 0 else "") + esc(t) + ("" if v >= 0 else "  "),
+                    va="center", ha="left" if v >= 0 else "right", fontsize=8.5)
+        ax.set_xlim(*xlim)
+        ax.grid(axis="x", color=grade)
+        ax.set_axisbelow(True)
+        ax.axvline(0, color=mudo, lw=0.8)
+
+    rc = {"font.size": 9, "text.color": tinta, "axes.edgecolor": grade, "axes.labelcolor": mudo,
+          "xtick.color": mudo, "ytick.color": tinta, "axes.spines.top": False, "axes.spines.right": False}
+    with plt.rc_context(rc):
+        if tipo in ("barras_agrupadas", "variacao"):
+            grupos = list(dict.fromkeys(d["grupo"]))
+            linhas = [int((d["grupo"] == g).sum()) for g in grupos]
+            fig, axes = plt.subplots(len(grupos), 1, squeeze=False, figsize=(8, 1.0 + sum(linhas) * 0.34 + 0.9 * len(grupos)),
+                                     gridspec_kw={"height_ratios": linhas}, layout="constrained")
+            vmax, vmin = float(d["valor"].max()), float(d["valor"].min())
+            xlim = (min(0.0, vmin) * 1.45, max(0.0, vmax) * 1.45) if tipo == "variacao" else (0, vmax * 1.2)
+            for ax, g in zip(axes[:, 0], grupos):
+                sub = d[d["grupo"] == g]
+                sub = sub.reindex(sub["valor"].abs().sort_values(ascending=False).index) if tipo == "variacao" \
+                    else sub.sort_values("valor", ascending=False)
+                barras(ax, sub, (lambda v: roxo if v >= 0 else ouro) if tipo == "variacao" else (lambda v: roxo), xlim)
+                ax.set_title(esc(g), loc="left", fontweight="bold", fontsize=10)
+            axes[-1, 0].set_xlabel(esc(eixo))
+            if tipo == "variacao":
+                fig.legend(handles=[Patch(color=roxo, label="Concorrente mais caro"), Patch(color=ouro, label="Concorrente mais barato")],
+                           loc="outside lower center", ncol=2, frameon=False)
+        elif tipo == "barras_h":
+            sub = d.sort_values("valor", ascending=False)
+            fig, ax = plt.subplots(figsize=(8, 0.9 + len(sub) * 0.5))
+            barras(ax, sub, lambda v: roxo, (0, float(d["valor"].max()) * 1.2))
+            ax.set_xlabel(esc(eixo))
+        elif tipo == "linha":
+            fig, ax = plt.subplots(figsize=(8, 3.6))
+            ax.plot(d["data"], d["valor"], color=roxo, lw=2.2, marker="o")
+            ax.fill_between(d["data"], d["valor"], float(d["valor"].min()), color=roxo, alpha=0.12)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+            ax.set_ylabel(esc(eixo))
+            ax.grid(axis="y", color=grade)
+            if len(d) <= 12:
+                for x, y, t in zip(d["data"], d["valor"], d["texto"]):
+                    ax.annotate(esc(t), (x, y), textcoords="offset points", xytext=(0, 7), ha="center", fontsize=8)
+        elif tipo == "pizza":
+            cores = {"Farmazids mais barata": roxo, "Preço similar": ouro, "Farmazids mais cara": tinta}
+            total = float(d["valor"].sum()) or 1.0
+            fig, ax = plt.subplots(figsize=(6.6, 3.6))
+            fatias, _ = ax.pie(d["valor"], colors=[cores.get(r, mudo) for r in d["rotulo"]], startangle=90,
+                               counterclock=False, wedgeprops=dict(width=0.38, edgecolor="white", linewidth=2))
+            ax.legend(fatias, [f"{esc(r)}: {esc(t)} ({v / total * 100:.0f}%)" for r, t, v in zip(d["rotulo"], d["texto"], d["valor"])],
+                      loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False)
+        else:  # barras_v
+            paleta = ["#6d3fc0", "#1c1c1e", "#a98ee0", "#676768", "#c7b5ec", "#303033"]
+            fig, ax = plt.subplots(figsize=(8, 3.6))
+            ax.bar([esc(cortar(x, 20)) for x in d["rotulo"]], d["valor"], color=[paleta[i % 6] for i in range(len(d))])
+            for i, t in enumerate(d["texto"]):
+                ax.text(i, float(d["valor"].iloc[i]), esc(t), ha="center", va="bottom", fontsize=9, fontweight="bold")
+            ax.set_ylabel(esc(eixo))
+            ax.grid(axis="y", color=grade)
+            ax.set_axisbelow(True)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=200, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+    return buf.getvalue()
+
+
+def gerar_pdf_insights() -> bytes:
+    """Monta o PDF (A4 paisagem): capa + uma página por indicador, com gráfico, dados e análise."""
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    roxo, tinta, mudo, grade = colors.HexColor("#6d3fc0"), colors.HexColor("#1c1c1e"), colors.HexColor("#676768"), colors.HexColor("#e6e3ee")
+    try:
+        from zoneinfo import ZoneInfo
+        agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    except Exception:
+        agora = datetime.now()
+    quando = agora.strftime("%d/%m/%Y às %H:%M")
+
+    capa_t = ParagraphStyle("capa_t", fontName="Helvetica-Bold", fontSize=34, leading=40, textColor=tinta)
+    h1 = ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=20, leading=24, textColor=tinta, spaceAfter=10)
+    rotulo = ParagraphStyle("rot", fontName="Helvetica", fontSize=8.5, leading=11, textColor=roxo, spaceAfter=2)
+    corpo = ParagraphStyle("corpo", fontName="Helvetica", fontSize=10.5, leading=15, textColor=tinta)
+    peq = ParagraphStyle("peq", fontName="Helvetica", fontSize=8.5, leading=11, textColor=tinta)
+    peq_b = ParagraphStyle("peq_b", parent=peq, fontName="Helvetica-Bold", textColor=roxo)
+
+    P = lambda t, st_=corpo: Paragraph(escape(_pdf_texto(t)).replace("\n", "<br/>"), st_)
+
+    def imagem(png: bytes, max_w: float, max_h: float):
+        iw, ih = ImageReader(io.BytesIO(png)).getSize()
+        k = min(max_w / iw, max_h / ih)
+        return Image(io.BytesIO(png), width=iw * k, height=ih * k)
+
+    def tabela_simples(cab: list, linhas: list, larguras: list):
+        dados = [[Paragraph(escape(_pdf_texto(c)), peq_b) for c in cab]] + \
+                [[Paragraph(escape(_pdf_texto(c)), peq) for c in l] for l in linhas]
+        t = Table(dados, colWidths=larguras, repeatRows=1)
+        t.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.4, grade), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3)]))
+        return t
+
+    def moldura(canvas, doc):
+        w, h = landscape(A4)
+        canvas.saveState()
+        canvas.setFillColor(roxo)
+        canvas.rect(0, h - 0.3 * cm, w, 0.3 * cm, stroke=0, fill=1)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(mudo)
+        canvas.drawString(1.5 * cm, 0.9 * cm, _pdf_texto(f"{BOT_NAME} · Farmazids · gerado em {quando}"))
+        canvas.drawRightString(w - 1.5 * cm, 0.9 * cm, f"Página {doc.page}")
+        canvas.restoreState()
+
+    historia = []
+    # ----- capa -----
+    caminho = Path(__file__).parent / "logo_farmazids.png"
+    if caminho.exists():
+        logo = imagem(caminho.read_bytes(), 9 * cm, 2.6 * cm)
+        logo.hAlign = "LEFT"
+        historia += [logo, Spacer(1, 1.2 * cm)]
+    historia += [Paragraph("PAINEL DE PREÇOS", rotulo), Paragraph(f"Insights do {BOT_NAME}", capa_t), Spacer(1, 0.4 * cm),
+                 P(f"Gerado em {quando}", corpo), Spacer(1, 1 * cm), Paragraph("INDICADORES DESTE RELATÓRIO", rotulo)]
+    historia += [P(f"{i}. {sp['titulo']}", corpo) for i, sp in enumerate(INSIGHTS, 1)]
+    historia += [Spacer(1, 1 * cm),
+                 P("Os indicadores são gerados a partir das bases de preços dos concorrentes e do histórico de vendas da "
+                   "Farmazids, por consulta em linguagem natural. Os valores podem variar entre atualizações.", peq)]
+
+    # ----- um indicador por página -----
+    for i, spec in enumerate(INSIGHTS, 1):
+        historia += [PageBreak(), Paragraph(f"INDICADOR {i} DE {len(INSIGHTS)}", rotulo), P(spec["titulo"], h1)]
+        try:
+            r = run_insight(spec["pergunta"])
+        except RuntimeError as exc:
+            historia.append(P(f"Indicador indisponível no momento: {exc}"))
+            continue
+        bruto = rows_to_df(r.get("rows") or [])
+        if spec["tipo"] == "tabela":
+            d = None
+            if bruto is not None and bruto.shape[1] >= 4:
+                d = bruto.iloc[:, :4].copy()
+                d.columns = ["concorrente", "produto", "categoria", "preco"]
+                d["preco"] = pd.to_numeric(d["preco"], errors="coerce")
+            if d is None or d.empty:
+                historia.append(P("Sem dados para este indicador no momento."))
+            else:
+                for nome, sub in d.groupby("concorrente", sort=True):
+                    historia += [P(f"Presente na {nome}, ausente na Farmazids", peq_b), Spacer(1, 0.15 * cm),
+                                 tabela_simples(["Produto", "Categoria", "Preço no pix"],
+                                                [[x.produto, x.categoria, fmt_valor(x.preco, "dinheiro")] for x in sub.head(5).itertuples()],
+                                                [14 * cm, 6 * cm, 4 * cm]), Spacer(1, 0.4 * cm)]
+        else:
+            d = padronizar(bruto, spec)
+            if d is None:
+                historia.append(P("Sem dados para este indicador no momento."))
+            else:
+                if "grupo" in d.columns:
+                    cab = [spec.get("nome_grupo", "Farmácia"), spec.get("nome_item", "Produto"), spec["eixo"]]
+                    linhas = [[x.grupo, x.rotulo, x.texto] for x in d.head(14).itertuples()]
+                    larg = [2.6 * cm, 4.6 * cm, 2.4 * cm]
+                elif "data" in d.columns:
+                    cab = ["Dia", spec["eixo"]]
+                    linhas = [[x.data.strftime("%d/%m/%Y"), x.texto] for x in d.head(14).itertuples()]
+                    larg = [4 * cm, 5.6 * cm]
+                else:
+                    cab = [spec.get("nome_item", "Item"), spec["eixo"]]
+                    linhas = [[x.rotulo, x.texto] for x in d.head(14).itertuples()]
+                    larg = [6.2 * cm, 3.4 * cm]
+                try:
+                    grafico = imagem(grafico_pdf(d, spec), 15.4 * cm, 11.2 * cm)
+                except Exception:
+                    grafico = P("Não foi possível desenhar o gráfico; os dados estão na tabela ao lado.", peq)
+                bloco = Table([[grafico, tabela_simples(cab, linhas, larg)]], colWidths=[15.8 * cm, 9.6 * cm])
+                bloco.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                           ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+                historia += [bloco, Spacer(1, 0.3 * cm)]
+
+    saida = io.BytesIO()
+    doc = SimpleDocTemplate(saida, pagesize=landscape(A4), leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            topMargin=1.4 * cm, bottomMargin=1.6 * cm, title=f"Insights do {BOT_NAME}", author="Farmazids")
+    doc.build(historia, onFirstPage=moldura, onLaterPages=moldura)
+    return saida.getvalue()
+
+
 def render_insights():
     c_txt, c_img = st.columns([1.3, 1], gap="large", vertical_alignment="center")
     with c_txt:
@@ -937,9 +1188,22 @@ def render_insights():
             f'Os resultados são guardados por 1 hora.</p>',
             unsafe_allow_html=True,
         )
-        if st.button("Atualizar dados", key="refresh_insights"):
+        b1, b2, b3 = st.columns([1, 0.9, 1.1])
+        if b1.button("Atualizar dados", key="refresh_insights"):
             run_insight.clear()
+            st.session_state.pop("pdf_insights", None)
             st.rerun()
+        if b2.button("Gerar PDF", key="gerar_pdf"):
+            try:
+                with carregando("Gerando o PDF..."):
+                    st.session_state.pdf_insights = gerar_pdf_insights()
+            except ImportError:
+                st.error("Para gerar o PDF, instale: py -m pip install reportlab matplotlib")
+            except Exception as exc:
+                st.error(f"Não foi possível gerar o PDF: {exc}")
+        if st.session_state.get("pdf_insights"):
+            b3.download_button("Baixar PDF", st.session_state.pdf_insights, key="baixar_pdf", type="primary",
+                               file_name=f"insights_zids_{datetime.now():%Y-%m-%d}.pdf", mime="application/pdf")
     with c_img:
         # mesma moldura (card branco + área cinza) do hero da página Chatbot
         st.markdown(
@@ -965,7 +1229,7 @@ def render_insights():
                         st.info("Sem dados para este indicador no momento.")
                     with st.expander("Ver consulta"):
                         if r.get("content"):
-                            st.markdown(r["content"])
+                            st.markdown(md_seguro(r["content"]))
                         st.code(r["sql"], language="sql")
                     continue
                 d = padronizar(bruto, spec)
@@ -976,7 +1240,7 @@ def render_insights():
                                     theme=None if DARK else "streamlit")
                 with st.expander("Ver tabela e consulta"):
                     if r.get("content"):
-                        st.markdown(r["content"])
+                        st.markdown(md_seguro(r["content"]))
                     if d is not None:
                         tabela = d.drop(columns=["valor"]).rename(columns={"texto": spec["eixo"], "rotulo": spec.get("nome_item", "Item"),
                                                                            "grupo": spec.get("nome_grupo", "Farmácia"), "data": "Dia"})
@@ -1236,12 +1500,13 @@ for m in st.session_state.messages:
 
 prompt = st.chat_input("Escreva sua pergunta") or clicked
 if prompt:
+    historico = montar_historico(st.session_state.messages)
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(md_seguro(prompt))
     with st.chat_message("assistant"):
         with carregando("Consultando os dados..."):
-            reply = generate_reply(prompt)
+            reply = generate_reply(prompt, historico)
             reply["chart"] = wants_chart(prompt)
             reply["pergunta"] = prompt
         render_message(reply)

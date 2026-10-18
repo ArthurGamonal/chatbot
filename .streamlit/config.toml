@@ -2,7 +2,7 @@
 [theme]
 base = "light"
 primaryColor = "#1c1c1e"            # Ink Black: botões primários e foco (verde fica só nos acentos)
-backgroundColor = "#ffffff"         # Pure White: canvas
+backgroundColor = "#faf8f5"         # Off-white: canvas
 secondaryBackgroundColor = "#eff1f6" # Mist Gray: único tom de card
 textColor = "#1c1c1e"
 font = "sans serif"
