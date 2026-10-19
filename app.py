@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from datetime import datetime
+from html import escape as esc
 from pathlib import Path
 
 import altair as alt
@@ -55,6 +56,9 @@ INK = "#f2f0f7" if DARK else "#1c1c1e"
 MUTED = "#a9a4b8" if DARK else "#676768"
 GRID = "#2f2640" if DARK else "#eff1f6"
 SURFACE = "#1c1528" if DARK else "#faf8f5"
+# GIF do Zids: versão noturna no modo escuro (os dois arquivos ficam na pasta static)
+ZIDS_GIF = "app/static/ZIDS_dark.gif" if DARK else "app/static/ZIDS.gif"
+ZIDS_INSIGHTS_GIF = "app/static/ZIDS_INSIGHTS_dark.gif" if DARK else "app/static/ZIDS_INSIGHTS.gif"
 
 # ---------- Estilo (tokens do Grove AI) ----------
 st.markdown(
@@ -198,7 +202,7 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .g-b1 { align-self: flex-start; background: var(--color-brand); color: var(--color-pure-white);
   border-radius: var(--radius-buttons); padding: var(--spacing-8) var(--spacing-16); font-size: var(--text-body-sm); }
 .g-b2 { align-self: flex-start; border: 1px solid rgba(28,28,30,.2); border-radius: var(--radius-buttons);
-  padding: var(--spacing-8) var(--spacing-16); font-size: 18px; letter-spacing: -0.017em; }
+  padding: var(--spacing-8) var(--spacing-16); font-size: var(--text-body-sm); letter-spacing: var(--tracking-body-sm); }
 
 /* Estatísticas (fórmula: rótulo → número → legenda) */
 .g-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--spacing-16); margin-bottom: var(--section-gap); }
@@ -230,7 +234,7 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 
 /* Botão "Baixar PDF" no mesmo estilo dos botões escuros */
 [data-testid="stDownloadButton"] button {
-  border-radius: var(--radius-buttons); padding: var(--spacing-12) var(--spacing-24);
+  border-radius: var(--radius-xl); padding: var(--spacing-12) var(--spacing-24);
   background: var(--color-ink-black); border: 1px solid var(--color-ink-black);
   box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4);
 }
@@ -248,7 +252,7 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] { display: none; }
 [data-testid="stChatMessage"] p { font-size: var(--text-body); line-height: var(--leading-body); letter-spacing: var(--tracking-body); }
 .stButton > button {
-  border-radius: var(--radius-buttons); padding: var(--spacing-12) var(--spacing-24);
+  border-radius: var(--radius-xl); padding: var(--spacing-12) var(--spacing-24);
   font-size: var(--text-body-sm); font-weight: var(--font-weight-medium); letter-spacing: var(--tracking-body-sm);
   border: 1px solid var(--color-ink-black); background: transparent; color: var(--color-ink-black); box-shadow: none;
 }
@@ -281,6 +285,12 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 /* Botão de tema: metade do tamanho dos botões do topo */
 .st-key-nav_theme button { padding: 6px 12px; min-height: 0; white-space: nowrap; }
 .st-key-nav_theme button p { font-size: 12px; }
+
+/* Botões do topo e do hero: retângulos de cantos arredondados (em vez de pílula) */
+.g-btn { border-radius: var(--radius-xl); }
+.st-key-nav_chat button, .st-key-nav_insights button, .st-key-nav_dados button, .st-key-nav_theme button {
+  border-radius: var(--radius-xl);
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -404,7 +414,7 @@ def tela_login():
 }
 [data-testid="stForm"] input { border-radius: var(--radius-inputs); }
 [data-testid="stFormSubmitButton"] button {
-  border-radius: var(--radius-buttons); padding: var(--spacing-12) var(--spacing-24);
+  border-radius: var(--radius-xl); padding: var(--spacing-12) var(--spacing-24);
   background: var(--color-ink-black); border: 1px solid var(--color-ink-black);
   box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4);
 }
@@ -454,7 +464,7 @@ body_html = (
     f'<h1 class="g-title">Conheça o <em>{BOT_NAME}</em></h1><p class="g-sub">{SUBHEAD}</p>'
     f'<div class="g-cta"><a class="g-btn fill" href="#conversar">Começar a conversar</a>'
     f'<a class="g-btn" href="#resultados">Ver resultados</a></div></div>'
-    f'<div class="g-mock"><div class="ph"><img src="app/static/ZIDS.gif" alt="{BOT_NAME}"></div>{bubbles}</div></div>'
+    f'<div class="g-mock"><div class="ph"><img src="{ZIDS_GIF}" alt="{BOT_NAME}"></div>{bubbles}</div></div>'
     f'<div id="resultados" class="g-stats">{stats}</div>'
     f'<div id="conversar"><h2 class="g-section">Converse com o {BOT_NAME}</h2>'
     f'<p class="g-cap" style="margin-bottom:24px">Escolha uma pergunta ou escreva a sua.</p></div>'
@@ -582,6 +592,7 @@ PALETTE = (
     if DARK
     else ["#6d3fc0", "#1c1c1e", "#a98ee0", "#676768", "#c7b5ec", "#303033"]
 )
+GOLD = "#c4a054"  # destaque da farmácia mais barata
 
 
 def tema_escuro(chart):
@@ -597,8 +608,26 @@ def tema_escuro(chart):
 CHART_WORDS = ("gráfico", "grafico", "chart", "plot", "plote", "visualização", "visualizacao")
 
 
-def wants_chart(pergunta: str) -> bool:
+def pediu_grafico(pergunta: str) -> bool:
     return any(w in pergunta.lower() for w in CHART_WORDS)
+
+
+def wants_chart(pergunta: str) -> bool:
+    return pediu_grafico(pergunta)
+
+
+def destaca_barato(pergunta: str) -> bool:
+    """Perguntas sobre o menor preço ganham a barra mais barata em dourado."""
+    q = pergunta.lower()
+    return any(k in q for k in ("barat", "menor preço", "menor preco", "mais em conta", "mais econom", "mais econôm"))
+
+
+def _tipo_marca(chart):
+    try:
+        mk = chart.mark
+        return mk if isinstance(mk, str) else getattr(mk, "type", None)
+    except Exception:
+        return None
 
 
 def build_chart(df: pd.DataFrame, pergunta: str):
@@ -640,7 +669,7 @@ def build_chart(df: pd.DataFrame, pergunta: str):
         return alt.Chart(d).mark_arc().encode(
             theta="valor:Q", color=alt.Color("rotulo:N", title=None, scale=alt.Scale(range=PALETTE))
         )
-    return (
+    barras = (
         alt.Chart(d)
         .mark_bar(color=PURPLE, cornerRadiusEnd=4)
         .encode(
@@ -649,6 +678,10 @@ def build_chart(df: pd.DataFrame, pergunta: str):
             tooltip=["rotulo", "valor"],
         )
     )
+    if destaca_barato(q):  # em gráfico pedido pelo usuário, o menor valor (mais barato) fica em dourado
+        barras = barras.encode(color=alt.condition(
+            alt.datum.valor == float(d["valor"].min()), alt.value(GOLD), alt.value(PURPLE)))
+    return barras
 
 
 def md_seguro(texto) -> str:
@@ -664,7 +697,9 @@ def render_message(m: dict):
         if chart is not None:
             st.altair_chart(tema_escuro(chart.properties(height=320)), use_container_width=True,
                             theme=None if DARK else "streamlit")
-        else:
+            if destaca_barato(m.get("pergunta", "")) and _tipo_marca(chart) == "bar":
+                st.caption("Em dourado: a opção mais barata.")
+        elif pediu_grafico(m.get("pergunta", "")):
             st.info("Não há dados numéricos suficientes para montar um gráfico com essa pergunta.")
     if m.get("sql"):
         with st.expander("Ver consulta e dados"):
@@ -1178,6 +1213,290 @@ def gerar_pdf_insights() -> bytes:
     return saida.getvalue()
 
 
+# ---------- Dados mais memoráveis: sparklines, régua de preço e cartão de produto ----------
+FARMACIAS = ["Farmazids", "FarmaPonte", "VeraCruz"]
+UP_COR = "#3ccf8e" if DARK else "#1f9d63"
+DOWN_COR = "#ff7a7a" if DARK else "#d64545"
+CINZA_BARRA = "#6f6985" if DARK else "#9c98a8"
+
+CSS_DESTAQUES = """
+<style>
+/* Sparkline + seta colorida dentro dos cartões de estatística */
+.g-spark { display: flex; align-items: center; justify-content: space-between; gap: var(--spacing-12); margin-top: var(--spacing-16); }
+.g-spark svg { width: 100%; max-width: 150px; height: auto; display: block; overflow: visible; }
+.g-spark .linha { fill: none; stroke: var(--color-brand); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.g-spark .area { fill: var(--color-brand); opacity: .14; stroke: none; }
+.g-spark .ponto { fill: var(--color-brand); }
+.g-delta { font-size: var(--text-body-sm); font-weight: var(--font-weight-semibold); letter-spacing: 0; white-space: nowrap; }
+.g-delta.up { color: __UP__; }
+.g-delta.down { color: __DOWN__; }
+.g-delta.flat { color: var(--color-slate-mid); }
+
+/* Legenda das cores (dourado = menor preço) */
+.g-legenda { display: flex; flex-wrap: wrap; gap: var(--spacing-16); font-size: var(--text-caption); letter-spacing: 0;
+  color: var(--color-graphite); margin: var(--spacing-8) 0 var(--spacing-4); }
+.g-legenda i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.g-legenda .ouro { background: var(--color-gold); }
+.g-legenda .roxo { background: var(--color-brand); }
+.g-legenda .cinza { background: #9c98a8; }
+
+/* Cartão de produto: comparação lado a lado + régua de preço */
+.g-prods { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: var(--spacing-16); margin: var(--spacing-16) 0 var(--spacing-24); }
+.g-prod { background: var(--surface-card); border-radius: var(--radius-cards); padding: var(--card-padding);
+  display: flex; flex-direction: column; gap: var(--spacing-16); }
+.g-prod-nome { font-weight: var(--font-weight-semibold); line-height: 1.3; }
+.g-prod-status { align-self: flex-start; font-size: var(--text-caption); line-height: 1.4; letter-spacing: 0;
+  border-radius: var(--radius-tags); padding: var(--spacing-4) var(--spacing-12); }
+.g-prod-status.ok { background: rgba(196,160,84,.22); color: var(--color-gold-deep); font-weight: var(--font-weight-semibold); }
+.g-prod-status.acima { background: rgba(128,128,128,.18); color: var(--color-graphite); }
+.g-lado { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--spacing-8); }
+.g-col { border: 1px solid rgba(128,128,128,.28); border-radius: var(--radius-xl); background: var(--surface-canvas);
+  padding: var(--spacing-12) var(--spacing-8); text-align: center; }
+.g-col.nossa { border-color: var(--color-brand); }
+.g-col.barata { border-color: var(--color-gold); box-shadow: 0 0 0 1px var(--color-gold); background: rgba(196,160,84,.14); }
+.g-col-nome { font-size: var(--text-caption); letter-spacing: .6px; text-transform: uppercase; color: var(--color-slate-mid); }
+.g-col.nossa .g-col-nome { color: var(--color-brand); font-weight: var(--font-weight-semibold); }
+.g-col-preco { font-size: var(--text-subheading); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-subheading); margin: var(--spacing-4) 0; }
+.g-col.sem .g-col-preco { color: var(--color-slate-mid); font-weight: var(--font-weight-regular); }
+.g-col-dif { font-size: var(--text-caption); line-height: 1.5; letter-spacing: 0; color: var(--color-slate-mid); min-height: 1.5em; }
+.g-col-tag { display: inline-block; font-size: 11px; font-weight: var(--font-weight-semibold); background: var(--color-gold);
+  color: #231a33; border-radius: var(--radius-tags); padding: 0 var(--spacing-8); }
+
+/* Régua de preço horizontal */
+.g-regua { position: relative; height: 88px; margin: 0 var(--spacing-8); }
+.g-regua-trilho { position: absolute; left: 0; right: 0; top: 38px; height: 4px; border-radius: 4px; background: rgba(128,128,128,.35); }
+.g-regua-marca { position: absolute; top: 32px; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%;
+  background: #9c98a8; border: 2px solid var(--surface-card); box-sizing: border-box; }
+.g-regua-marca.nossa { top: 30px; width: 20px; height: 20px; margin-left: -10px; background: var(--color-brand); }
+.g-regua-marca.barata { background: var(--color-gold); }
+.g-regua-marca.nossa.barata { background: var(--color-gold); box-shadow: 0 0 0 3px var(--color-brand); }
+.g-regua-rot { position: absolute; transform: translateX(-50%); font-size: 11px; line-height: 1.2; letter-spacing: 0;
+  white-space: nowrap; color: var(--color-graphite); }
+.g-regua-rot.topo { top: 6px; font-weight: var(--font-weight-semibold); color: var(--color-brand); }
+.g-regua-rot.b0 { top: 54px; }
+.g-regua-rot.b1 { top: 70px; }
+.g-regua-rot.barata { color: var(--color-gold-deep); font-weight: var(--font-weight-semibold); }
+.g-regua-ext { display: flex; justify-content: space-between; font-size: 11px; letter-spacing: 0; color: var(--color-slate-mid); margin: 0 var(--spacing-8); }
+</style>
+""".replace("__UP__", UP_COR).replace("__DOWN__", DOWN_COR)
+
+
+def sparkline(valores, w: int = 150, h: int = 40, pad: int = 4) -> str:
+    """Mini-gráfico de linha em SVG (sem eixos) para os cartões de estatística."""
+    v = [float(x) for x in valores if pd.notna(x)]
+    if len(v) < 2:
+        return ""
+    lo, hi = min(v), max(v)
+    xs = [pad + i * (w - 2 * pad) / (len(v) - 1) for i in range(len(v))]
+    ys = [h / 2 if hi == lo else h - pad - (x - lo) / (hi - lo) * (h - 2 * pad) for x in v]
+    pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    return (
+        f'<svg viewBox="0 0 {w} {h}" role="img" aria-label="Tendência">'
+        f'<polygon class="area" points="{xs[0]:.1f},{h} {pts} {xs[-1]:.1f},{h}"/>'
+        f'<polyline class="linha" points="{pts}"/>'
+        f'<circle class="ponto" cx="{xs[-1]:.1f}" cy="{ys[-1]:.1f}" r="3.5"/></svg>'
+    )
+
+
+def seta_delta(valores, ref: str = "") -> str:
+    """Seta ↑/↓ colorida com a variação do último ponto em relação ao anterior."""
+    v = [float(x) for x in valores if pd.notna(x)]
+    if len(v) < 2:
+        return ""
+    ant, atual = v[-2], v[-1]
+    if atual > ant:
+        cls, seta = "up", "↑"
+    elif atual < ant:
+        cls, seta = "down", "↓"
+    else:
+        cls, seta = "flat", "→"
+    pct = f" {fmt_valor(abs(atual - ant) / abs(ant) * 100, 'pct')}" if ant else ""
+    dica = f' title="{esc(ref)}"' if ref else ""
+    return f'<span class="g-delta {cls}"{dica}>{seta}{pct}</span>'
+
+
+def card_stat(rotulo, valor, legenda, serie=None, ref: str = "") -> str:
+    """Cartão de estatística (rótulo → número → legenda) com sparkline e seta quando há série."""
+    extra = ""
+    if serie is not None and len(serie) >= 2:
+        extra = f'<div class="g-spark">{sparkline(serie)}{seta_delta(serie, ref)}</div>'
+    return (f'<div class="g-stat"><div class="g-label">{rotulo}</div><div class="g-num">{valor}</div>'
+            f'<div class="g-cap">{legenda}</div>{extra}</div>')
+
+
+LEGENDA_PRECO = ('<div class="g-legenda"><span><i class="ouro"></i>Menor preço</span>'
+                 '<span><i class="roxo"></i>Farmazids</span><span><i class="cinza"></i>Concorrentes</span></div>')
+
+COMPARATIVO = {
+    "titulo": "Preço por produto",
+    "colunas": ["produto", "Farmazids", "FarmaPonte", "VeraCruz"],
+    "pergunta": (
+        "Pegue 6 produtos da Farmazids (tabela medicamentos_farmazids, coluna preco, só a coleta mais recente, "
+        "um registro por gtin, com preco IS NOT NULL e preco > 0) que sejam os mais vendidos no mês mais recente "
+        "com vendas registradas na tabela historico_farmazids (considere o mês da maior data_venda da tabela, e não "
+        "o mês atual; some quantidade_vendida por gtin) e que existam em pelo menos um concorrente. Para cada produto "
+        "traga o preco_desconto_pix da FarmaPonte (tabela farmaponte_tratado) e da VeraCruz (tabela veracruz_tratado), "
+        "usando só a coleta mais recente de cada tabela e ligando pelo gtin com LEFT JOIN; preço nulo ou zero do "
+        "concorrente deve virar NULL. Devolva exatamente 4 colunas, nesta ordem e com estes apelidos: produto "
+        "(nome do produto na Farmazids), preco_farmazids, preco_farmaponte, preco_veracruz."
+    ),
+}
+
+
+def preparar_comparativo(bruto):
+    """Lê as colunas por posição: produto, Farmazids, FarmaPonte, VeraCruz (preço <= 0 vira vazio)."""
+    if bruto is None or bruto.shape[1] < 4:
+        return None
+    d = bruto.iloc[:, :4].copy()
+    d.columns = COMPARATIVO["colunas"]
+    for f in FARMACIAS:
+        d[f] = pd.to_numeric(d[f], errors="coerce")
+        d.loc[d[f] <= 0, f] = float("nan")
+    d = d.dropna(subset=["produto", "Farmazids"])
+    d = d[d[["FarmaPonte", "VeraCruz"]].notna().any(axis=1)]  # precisa de ao menos um concorrente
+    return d.head(6).reset_index(drop=True) if not d.empty else None
+
+
+def _rs(v) -> str:
+    """R$ para uso dentro de HTML no st.markdown (o $ vira entidade para não ser lido como fórmula)."""
+    return fmt_valor(v, "dinheiro").replace("$", "&#36;")
+
+
+def regua_html(precos: dict) -> str:
+    """Régua horizontal: do mais barato (esquerda) ao mais caro (direita), com a Farmazids em roxo."""
+    vals = list(precos.values())
+    lo, hi = min(vals), max(vals)
+    barata = {f for f, p in precos.items() if abs(p - lo) < 0.005}
+    pos = lambda p: 50.0 if hi - lo < 0.005 else 6 + (p - lo) / (hi - lo) * 88
+    rotulo_x = lambda x: min(max(x, 12), 88)
+    marcas, rotulos = [], []
+    concorrentes = sorted((f for f in precos if f != "Farmazids"), key=lambda f: precos[f])
+    for i, f in enumerate(concorrentes):  # rótulos alternam em duas linhas para não se sobrepor
+        x, cls = pos(precos[f]), ("barata" if f in barata else "")
+        dica = f'title="{esc(f)}: {_rs(precos[f])}"'
+        marcas.append(f'<div class="g-regua-marca {cls}" style="left:{x:.1f}%" {dica}></div>')
+        rotulos.append(f'<div class="g-regua-rot b{i % 2} {cls}" style="left:{rotulo_x(x):.1f}%">{esc(f)}</div>')
+    x = pos(precos["Farmazids"])
+    cls = "barata" if "Farmazids" in barata else ""
+    dica = f'title="Farmazids: {_rs(precos["Farmazids"])}"'
+    marcas.append(f'<div class="g-regua-marca nossa {cls}" style="left:{x:.1f}%" {dica}></div>')
+    rotulos.append(f'<div class="g-regua-rot topo" style="left:{rotulo_x(x):.1f}%">Farmazids</div>')
+    if hi - lo < 0.005:
+        ext = f'<span style="margin:0 auto">Mesmo preço: {_rs(lo)}</span>'
+    else:
+        ext = f'<span>{_rs(lo)} · mais barato</span><span>mais caro · {_rs(hi)}</span>'
+    return (f'<div class="g-regua"><div class="g-regua-trilho"></div>{"".join(marcas)}{"".join(rotulos)}</div>'
+            f'<div class="g-regua-ext">{ext}</div>')
+
+
+def card_produto(nome: str, precos: dict) -> str:
+    """Cartão com as três farmácias lado a lado, o veredito e a régua de preço."""
+    disp = {f: p for f, p in precos.items() if pd.notna(p)}
+    faz = disp["Farmazids"]
+    lo = min(disp.values())
+    barata = [f for f, p in disp.items() if abs(p - lo) < 0.005]
+    if "Farmazids" in barata:
+        status = ("ok", "Farmazids tem o menor preço" + (" (empate)" if len(barata) > 1 else ""))
+    else:
+        pct = fmt_valor((faz - lo) / lo * 100, "pct")
+        status = ("acima", f"Farmazids está {_rs(faz - lo)} ({pct}) acima da {esc(barata[0])}")
+    colunas = []
+    for f in FARMACIAS:
+        p = precos.get(f)
+        cls = ["g-col"] + (["nossa"] if f == "Farmazids" else [])
+        if pd.isna(p):
+            cls.append("sem")
+            preco, dif = "—", "sem preço"
+        else:
+            preco = _rs(p)
+            if f in barata:
+                cls.append("barata")
+                dif = '<span class="g-col-tag">Mais barata</span>'
+            elif f == "Farmazids":
+                dif = "nosso preço"
+            else:
+                d = (p - faz) / faz * 100
+                dif = f'{"+" if d > 0 else ""}{fmt_valor(d, "pct")} vs. Farmazids'
+        colunas.append(f'<div class="{" ".join(cls)}"><div class="g-col-nome">{f}</div>'
+                       f'<div class="g-col-preco">{preco}</div><div class="g-col-dif">{dif}</div></div>')
+    return (f'<div class="g-prod"><div class="g-prod-nome">{esc(str(nome))}</div>'
+            f'<div class="g-prod-status {status[0]}">{status[1]}</div>'
+            f'<div class="g-lado">{"".join(colunas)}</div>{regua_html(disp)}</div>')
+
+
+def grafico_comparativo(d: pd.DataFrame):
+    """Barras de preço por farmácia, uma faixa por produto; a mais barata em dourado."""
+    fonte = "Geist"
+    longo = d.melt(id_vars="produto", value_vars=FARMACIAS, var_name="farmacia", value_name="preco").dropna(subset=["preco"])
+    menor = longo.groupby("produto")["preco"].transform("min")
+    longo["barata"] = (longo["preco"] - menor).abs() < 0.005
+    longo["cor"] = [GOLD if b else (PURPLE if f == "Farmazids" else CINZA_BARRA)
+                    for b, f in zip(longo["barata"], longo["farmacia"])]
+    longo["texto"] = longo["preco"].map(lambda v: fmt_valor(v, "dinheiro"))
+    longo["situacao"] = longo["barata"].map({True: "Menor preço", False: "—"})
+    longo["teto"] = longo.groupby("produto")["preco"].transform("max") * 1.35  # folga para o rótulo do valor
+    base = alt.Chart(longo)
+    y = alt.Y("farmacia:N", sort=FARMACIAS, title=None, axis=alt.Axis(labelLimit=120))
+    barras = base.mark_bar(cornerRadiusEnd=6).encode(
+        y=y, x=alt.X("preco:Q", axis=None),
+        color=alt.Color("cor:N", scale=None, legend=None),
+        tooltip=[alt.Tooltip("produto:N", title="Produto"), alt.Tooltip("farmacia:N", title="Farmácia"),
+                 alt.Tooltip("texto:N", title="Preço no pix"), alt.Tooltip("situacao:N", title="Situação")],
+    )
+    rotulos = base.mark_text(align="left", dx=6, color=INK, font=fonte).encode(
+        y=y, x=alt.X("preco:Q", axis=None), text="texto:N")
+    folga = base.mark_point(opacity=0).encode(y=y, x=alt.X("teto:Q", axis=None))
+    chart = (
+        (barras + rotulos + folga)
+        .properties(width=300, height=alt.Step(22))
+        .facet(facet=alt.Facet("produto:N", title=None, sort=list(dict.fromkeys(d["produto"])),
+                               header=alt.Header(labelFontWeight=600, labelFontSize=13, labelLimit=320,
+                                                 labelAlign="left", labelAnchor="start")),
+               columns=1)
+        .resolve_scale(x="independent", y="independent")
+        .configure_view(stroke=None)
+        .configure_axis(labelFont=fonte, titleFont=fonte, grid=False, domain=False, ticks=False, labelColor=MUTED)
+        .configure_header(labelFont=fonte, labelColor=INK, titleColor=INK)
+    )
+    return chart.properties(background="rgba(0,0,0,0)") if DARK else chart
+
+
+def render_comparativo():
+    """Seção da página Insights: cartão por produto (lado a lado + régua) e gráfico com a mais barata em dourado."""
+    st.markdown(CSS_DESTAQUES, unsafe_allow_html=True)
+    st.markdown(
+        '<div style="height:48px"></div>'
+        f'<h2 class="g-section">{COMPARATIVO["titulo"]}</h2>'
+        '<p class="g-cap">Preço no pix de cada produto nas três farmácias (coleta mais recente). '
+        'A régua mostra onde a Farmazids fica entre os concorrentes.</p>' + LEGENDA_PRECO,
+        unsafe_allow_html=True,
+    )
+    try:
+        with carregando("Consultando os dados..."):
+            r = run_insight(COMPARATIVO["pergunta"])
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
+    d = preparar_comparativo(rows_to_df(r.get("rows") or []))
+    if d is None:
+        st.info("Sem dados para este comparativo no momento.")
+        return
+    cartoes = "".join(card_produto(row["produto"], {f: row[f] for f in FARMACIAS}) for _, row in d.iterrows())
+    st.markdown(f'<div class="g-prods">{cartoes}</div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown('<div class="g-label">Preço por farmácia</div>', unsafe_allow_html=True)
+        st.altair_chart(grafico_comparativo(d), use_container_width=False, theme=None if DARK else "streamlit")
+    with st.expander("Ver tabela e consulta"):
+        if r.get("content"):
+            st.markdown(md_seguro(r["content"]))
+        tabela = d.rename(columns={"produto": "Produto"})
+        for f in FARMACIAS:
+            tabela[f] = tabela[f].map(lambda v: fmt_valor(v, "dinheiro"))
+        st.dataframe(tabela, use_container_width=True, hide_index=True)
+        st.code(r["sql"], language="sql")
+
+
+
 def render_insights():
     c_txt, c_img = st.columns([1.3, 1], gap="large", vertical_alignment="center")
     with c_txt:
@@ -1208,7 +1527,7 @@ def render_insights():
         # mesma moldura (card branco + área cinza) do hero da página Chatbot
         st.markdown(
             f'<div class="g-mock" style="min-height:0"><div class="ph" style="flex:none;aspect-ratio:16/9;min-height:0">'
-            f'<img src="app/static/ZIDS_INSIGHTS.gif" alt="{BOT_NAME}" style="object-position:50% 50%"></div></div>',
+            f'<img src="{ZIDS_INSIGHTS_GIF}" alt="{BOT_NAME}" style="object-position:50% 50%"></div></div>',
             unsafe_allow_html=True,
         )
     st.markdown('<div style="height:32px"></div>', unsafe_allow_html=True)
@@ -1248,6 +1567,7 @@ def render_insights():
                             tabela["Dia"] = tabela["Dia"].dt.strftime("%d/%m/%Y")
                         st.dataframe(tabela, use_container_width=True, hide_index=True)
                     st.code(r["sql"], language="sql")
+    render_comparativo()
 
 
 
@@ -1370,6 +1690,7 @@ DADOS = [
 
 def render_resumo(item: dict):
     """Resumo da base (quantidades e datas das extrações), lido por posição das colunas."""
+    st.markdown(CSS_DESTAQUES, unsafe_allow_html=True)
     st.markdown(
         """
 <style>
@@ -1412,6 +1733,8 @@ def render_resumo(item: dict):
     if d.empty:
         st.info("Resumo indisponível no momento.")
         return
+    serie = d.sort_values("data").tail(14)  # últimos pontos, em ordem cronológica (para as sparklines)
+    ref = "variação do último mês vs. o anterior" if tipo == "vendas" else "variação da última coleta vs. a anterior"
     ult, ini = d.iloc[0], d.iloc[-1]
     f_ult, f_ini = ult["data"].strftime(ordem_fmt), ini["data"].strftime(ordem_fmt)
     k = len(d)
@@ -1420,23 +1743,20 @@ def render_resumo(item: dict):
         frase = (f"Há <b>{n(total)}</b> vendas registradas em <b>{k}</b> meses, de {f_ini} a {f_ult}. "
                  f"No mês mais recente ({f_ult}) foram vendidos <b>{n(ult['produtos'])}</b> produtos diferentes "
                  f"em <b>{n(ult['farmacias'])}</b> farmácias.")
-        cartoes = [("Vendas registradas", n(total), f"em {k} meses"),
-                   ("Produtos vendidos", n(ult["produtos"]), f"no mês {f_ult}"),
-                   ("Farmácias", n(ult["farmacias"]), f"no mês {f_ult}"),
+        cartoes = [("Vendas registradas", n(total), f"em {k} meses", serie["vendas"].tolist()),
+                   ("Produtos vendidos", n(ult["produtos"]), f"no mês {f_ult}", serie["produtos"].tolist()),
+                   ("Farmácias", n(ult["farmacias"]), f"no mês {f_ult}", serie["farmacias"].tolist()),
                    ("Último mês", f_ult, "com vendas")]
     else:
         cat = f" em <b>{n(ult['categorias'])}</b> categorias" if tipo == "coletas" else ""
         frase = (f"Na <b>{origem}</b> há <b>{n(ult['produtos'])}</b> medicamentos extraídos{cat} na coleta mais "
                  f"recente ({f_ult}). Foram feitas <b>{k}</b> coletas, de {f_ini} a {f_ult}.")
-        cartoes = [("Medicamentos", n(ult["produtos"]), "na última coleta")]
+        cartoes = [("Medicamentos", n(ult["produtos"]), "na última coleta", serie["produtos"].tolist())]
         if tipo == "coletas":
-            cartoes.append(("Categorias", n(ult["categorias"]), "na última coleta"))
+            cartoes.append(("Categorias", n(ult["categorias"]), "na última coleta", serie["categorias"].tolist()))
         cartoes += [("Coletas feitas", n(k), f"de {f_ini} a {f_ult}"), ("Última coleta", f_ult, "dado mais recente")]
 
-    html = "".join(
-        f'<div class="g-stat"><div class="g-label">{a}</div><div class="g-num">{b}</div><div class="g-cap">{c}</div></div>'
-        for a, b, c in cartoes
-    )
+    html = "".join(card_stat(a, b, c, s[0] if s else None, ref) for a, b, c, *s in cartoes)
     datas = [x.strftime(ordem_fmt) for x in d["data"]]
     chips = "".join(f'<span class="g-chip">{x}</span>' for x in datas[:14])
     if len(datas) > 14:
