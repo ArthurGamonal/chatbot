@@ -45,7 +45,7 @@ SUGGESTIONS = [
     "Quais os 5 produtos mais vendidos em setembro?",
 ]
 
-st.set_page_config(page_title=f"{BOT_NAME}", page_icon="💜", layout="wide")
+st.set_page_config(page_title=f"{BOT_NAME}", page_icon="💜", layout="wide", initial_sidebar_state="expanded")
 
 # ---------- Modo escuro ----------
 if "dark" not in st.session_state:
@@ -59,6 +59,8 @@ SURFACE = "#1c1528" if DARK else "#faf8f5"
 # GIF do Zids: versão noturna no modo escuro (os dois arquivos ficam na pasta static)
 ZIDS_GIF = "app/static/ZIDS_dark.gif" if DARK else "app/static/ZIDS.gif"
 ZIDS_INSIGHTS_GIF = "app/static/ZIDS_INSIGHTS_dark.gif" if DARK else "app/static/ZIDS_INSIGHTS.gif"
+# GIF exibido na tela de login quando usuário ou senha estão incorretos (arquivo na pasta static)
+SENHA_ERRADA_GIF = "app/static/SENHA_ERRADA.gif"
 
 # ---------- Estilo (tokens do Grove AI) ----------
 st.markdown(
@@ -143,6 +145,8 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .stApp { background: var(--surface-canvas); overflow-x: hidden; }
 #MainMenu, footer { visibility: hidden; }
 [data-testid="stHeader"] { display: none; }
+/* A barra de chats é recolhida/aberta pelos botões próprios abaixo (os controles nativos ficam escondidos) */
+[data-testid="stSidebarCollapseButton"], [data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] { display: none !important; }
 .block-container { max-width: var(--page-max-width); padding: var(--spacing-16) var(--spacing-24) 8rem; }
 
 /* Faixa de anúncio e topo (largura total) */
@@ -291,6 +295,31 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .st-key-nav_chat button, .st-key-nav_insights button, .st-key-nav_dados button, .st-key-nav_theme button {
   border-radius: var(--radius-xl);
 }
+
+/* Barra lateral de chats (retrátil): um item por conversa, o ativo em destaque */
+[data-testid="stSidebar"] { background: var(--surface-card) !important; border-right: 1px solid rgba(128,128,128,.22); }
+[class*="st-key-chatsel_"] button { border: none; background: transparent; padding: var(--spacing-8) var(--spacing-12); }
+[class*="st-key-chatsel_"] button > div { justify-content: flex-start; width: 100%; }
+[class*="st-key-chatsel_"] button p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; width: 100%; }
+[class*="st-key-chatsel_"] button:hover { background: rgba(128,128,128,.16); }
+[class*="st-key-chatsel_on_"] button, [class*="st-key-chatsel_on_"] button:hover { background: rgba(109,63,192,.18); }
+[class*="st-key-chatsel_on_"] button p { font-weight: var(--font-weight-semibold); }
+[class*="st-key-chatdel_"] button { border: none; background: transparent; padding: var(--spacing-4); min-height: 0; color: var(--color-slate-mid); }
+[class*="st-key-chatdel_"] button:hover { background: rgba(214,69,69,.16); color: #d64545; }
+.st-key-abrir_chats { position: fixed; top: 12px; left: 12px; z-index: 1000000; width: auto !important; }
+.st-key-abrir_chats button, .st-key-fechar_chats button {
+  border: 1px solid var(--color-gold-deep); background: var(--surface-card); border-radius: var(--radius-xl);
+  padding: 6px 14px; min-height: 0;
+}
+.st-key-abrir_chats button p, .st-key-fechar_chats button p { color: var(--color-gold-deep); font-size: 16px; }
+.st-key-abrir_chats button:hover, .st-key-fechar_chats button:hover { background: rgba(196,160,84,.18); border-color: var(--color-gold-deep); }
+/* Aba Boas-vindas do topo, em dourado como as demais */
+.st-key-nav_inicio button { background: transparent; border: 1px solid var(--color-gold-deep); box-shadow: none; border-radius: var(--radius-xl); }
+.st-key-nav_inicio button p { color: var(--color-gold-deep); }
+.st-key-nav_inicio button:hover { background: rgba(196,160,84,.15); border-color: var(--color-gold-deep); }
+.st-key-nav_inicio button[kind="primary"], .st-key-nav_inicio button[data-testid="stBaseButton-primary"] {
+  background: var(--color-gold); border-color: var(--color-gold); box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4); }
+.st-key-nav_inicio button[kind="primary"] p, .st-key-nav_inicio button[data-testid="stBaseButton-primary"] p { color: var(--color-pine-shadow); }
 </style>
 """,
     unsafe_allow_html=True,
@@ -407,6 +436,8 @@ def tela_login():
 .g-login .g-logo-img { margin: 0 auto var(--spacing-24); }
 .g-login .g-tag { margin-bottom: var(--spacing-16); }
 .g-login .g-cap { margin-bottom: var(--spacing-24); }
+.g-erro-gif { text-align: center; margin-top: var(--spacing-16); }
+.g-erro-gif img { width: 100%; max-width: 360px; border-radius: var(--radius-cards); }
 [data-testid="stForm"] {
   border: 1px solid rgba(128,128,128,.25); border-radius: var(--radius-cards);
   padding: var(--card-padding); background: var(--color-pure-white);
@@ -444,9 +475,15 @@ def tela_login():
         if enviar:
             if _confere(usuario, senha, acessos):
                 st.session_state.autenticado = True
+                st.session_state.usuario = usuario.strip()
+                st.session_state.page = "inicio"  # a primeira tela depois da senha é a de boas-vindas
                 st.rerun()
             time.sleep(1)  # atrasa tentativas erradas
             st.error("Usuário ou senha incorretos.")
+            st.markdown(
+                f'<div class="g-erro-gif"><img src="{SENHA_ERRADA_GIF}" alt="Senha incorreta"></div>',
+                unsafe_allow_html=True,
+            )
 
 
 if not st.session_state.get("autenticado"):
@@ -474,9 +511,10 @@ if "page" not in st.session_state:
     st.session_state.page = "chat"
 
 # ---------- Topo: logo + botões de troca de página ----------
-c_logo, c_chat, c_ins, c_dados, c_tema = st.columns([4.05, 1.4, 1.4, 1.4, 0.85], vertical_alignment="center")
+c_logo, c_ini, c_chat, c_ins, c_dados, c_tema = st.columns([2.65, 1.4, 1.4, 1.4, 1.4, 0.85], vertical_alignment="center")
 c_logo.markdown(f'<div class="g-logo"><b>●</b> {BOT_NAME}</div>', unsafe_allow_html=True)
-for col, key, label in ((c_chat, "chat", "Chatbot"), (c_ins, "insights", "Insights"), (c_dados, "dados", "Dados")):
+for col, key, label in ((c_ini, "inicio", "Boas-vindas"), (c_chat, "chat", "Chatbot"),
+                        (c_ins, "insights", "Insights"), (c_dados, "dados", "Dados")):
     ativo = st.session_state.page == key
     if col.button(label, key=f"nav_{key}", type="primary" if ativo else "secondary", use_container_width=True):
         st.session_state.page = key
@@ -1332,11 +1370,12 @@ COMPARATIVO = {
     "colunas": ["produto", "Farmazids", "FarmaPonte", "VeraCruz"],
     "pergunta": (
         "Pegue 6 produtos da Farmazids (tabela medicamentos_farmazids, coluna preco, só a coleta mais recente, "
-        "um registro por gtin, com preco IS NOT NULL e preco > 0) que sejam os mais vendidos no mês mais recente "
+        "um registro por gtin com o MENOR preco (MIN), com preco IS NOT NULL e preco > 0) que sejam os mais vendidos no mês mais recente "
         "com vendas registradas na tabela historico_farmazids (considere o mês da maior data_venda da tabela, e não "
         "o mês atual; some quantidade_vendida por gtin) e que existam em pelo menos um concorrente. Para cada produto "
         "traga o preco_desconto_pix da FarmaPonte (tabela farmaponte_tratado) e da VeraCruz (tabela veracruz_tratado), "
-        "usando só a coleta mais recente de cada tabela e ligando pelo gtin com LEFT JOIN; preço nulo ou zero do "
+        "usando só a coleta mais recente de cada tabela, com um registro por gtin que traga o MENOR "
+        "preco_desconto_pix (MIN) daquele gtin, e ligando pelo gtin com LEFT JOIN; preço nulo ou zero do "
         "concorrente deve virar NULL. Devolva exatamente 4 colunas, nesta ordem e com estes apelidos: produto "
         "(nome do produto na Farmazids), preco_farmazids, preco_farmaponte, preco_veracruz."
     ),
@@ -1497,6 +1536,363 @@ def render_comparativo():
 
 
 
+# ---------- Aba de boas-vindas: o que mudou de uma extração para a outra ----------
+# Mesma lógica do alerta de variação de preço (Lambda):
+#  - preço real = o menor entre preco_sem_desconto e preco_desconto_pix (Farmazids: preco);
+#  - preço do dia = média do preço real do gtin naquele dia (a extração é o dia de data_extracao);
+#  - compara a extração mais recente de cada farmácia com a imediatamente anterior (DENSE_RANK por dia).
+ATHENA_DATABASE = os.environ.get("ATHENA_DATABASE", "t1-farmazids-equipe05")
+ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "t1-farmazids-05")
+BV_LIMITE_PCT = 10  # variação mínima (%) para entrar em "Maiores mudanças de preço" (= LIMITE_PCT do alerta)
+
+BV_CTE = """
+WITH base AS (
+  SELECT 'Farmazids' AS farmacia, CAST(gtin AS varchar) AS gtin, nome, CAST(preco AS double) AS preco_sem_desconto,
+         CAST(NULL AS double) AS preco_desconto_pix, data_extracao
+  FROM medicamentos_farmazids
+  UNION ALL
+  SELECT 'FarmaPonte', CAST(gtin AS varchar), nome, CAST(preco_sem_desconto AS double),
+         CAST(preco_desconto_pix AS double), data_extracao
+  FROM farmaponte_tratado
+  UNION ALL
+  SELECT 'VeraCruz', CAST(gtin AS varchar), nome, CAST(preco_sem_desconto AS double),
+         CAST(preco_desconto_pix AS double), data_extracao
+  FROM veracruz_tratado
+),
+base_dia AS (
+  SELECT farmacia, gtin, nome,
+         CASE
+           WHEN preco_desconto_pix > 0 THEN LEAST(preco_sem_desconto, preco_desconto_pix)
+           ELSE preco_sem_desconto
+         END AS preco_real,
+         date(date_parse(data_extracao, '%d/%m/%Y %H:%i')) AS dia
+  FROM base
+  WHERE preco_sem_desconto > 0 AND gtin IS NOT NULL AND gtin <> ''
+),
+precos AS (
+  SELECT farmacia, gtin, dia, MAX(nome) AS nome, AVG(preco_real) AS preco
+  FROM base_dia
+  GROUP BY 1, 2, 3
+),
+ranqueado AS (
+  SELECT *, DENSE_RANK() OVER (PARTITION BY farmacia ORDER BY dia DESC) AS ordem
+  FROM precos
+)
+"""
+
+BV_RESUMO = {
+    "colunas": ["farmacia", "coleta_atual", "coleta_anterior", "produtos", "alterados", "novos", "removidos",
+                "variacao_media_pct"],
+    "sql": BV_CTE + """
+, datas AS (
+  SELECT farmacia,
+         MAX(CASE WHEN ordem = 1 THEN dia END) AS atual,
+         MAX(CASE WHEN ordem = 2 THEN dia END) AS anterior
+  FROM ranqueado
+  GROUP BY 1
+),
+por_gtin AS (
+  SELECT farmacia, gtin,
+         MAX(CASE WHEN ordem = 1 THEN preco END) AS novo,
+         MAX(CASE WHEN ordem = 2 THEN preco END) AS antigo
+  FROM ranqueado
+  WHERE ordem <= 2
+  GROUP BY 1, 2
+)
+SELECT p.farmacia,
+       date_format(CAST(d.atual AS timestamp), '%d/%m/%Y') AS coleta_atual,
+       date_format(CAST(d.anterior AS timestamp), '%d/%m/%Y') AS coleta_anterior,
+       COUNT_IF(p.novo IS NOT NULL) AS produtos,
+       COUNT_IF(p.novo IS NOT NULL AND p.antigo IS NOT NULL AND ROUND(p.novo, 2) <> ROUND(p.antigo, 2)) AS alterados,
+       COUNT_IF(p.novo IS NOT NULL AND p.antigo IS NULL) AS novos,
+       COUNT_IF(p.novo IS NULL AND p.antigo IS NOT NULL) AS removidos,
+       ROUND(AVG(CASE WHEN p.novo IS NOT NULL AND p.antigo IS NOT NULL AND ROUND(p.novo, 2) <> ROUND(p.antigo, 2)
+                      THEN (p.novo - p.antigo) / p.antigo * 100 END), 1) AS variacao_media_pct
+FROM por_gtin p
+JOIN datas d ON d.farmacia = p.farmacia
+GROUP BY p.farmacia, d.atual, d.anterior
+""",
+}
+BV_MUDANCAS = {
+    "colunas": ["produto", "farmacia", "preco_anterior", "preco_atual", "variacao_pct"],
+    "sql": BV_CTE + """
+SELECT n.nome AS produto,
+       n.farmacia,
+       ROUND(a.preco, 2) AS preco_anterior,
+       ROUND(n.preco, 2) AS preco_atual,
+       ROUND((n.preco - a.preco) / a.preco * 100, 2) AS variacao_pct
+FROM ranqueado n
+JOIN ranqueado a
+  ON n.farmacia = a.farmacia AND n.gtin = a.gtin
+WHERE n.ordem = 1 AND a.ordem = 2
+  AND ABS((n.preco - a.preco) / a.preco * 100) >= """ + str(BV_LIMITE_PCT) + """
+ORDER BY ABS((n.preco - a.preco) / a.preco * 100) DESC
+LIMIT 6
+""",
+}
+
+
+class _SqlFalhou(RuntimeError):
+    """A consulta rodou no Athena mas falhou (erro de SQL, tempo esgotado...)."""
+
+
+@st.cache_resource
+def get_athena():
+    return boto3.client("athena", region_name=AWS_REGION,
+                        config=Config(read_timeout=60, connect_timeout=10, retries={"max_attempts": 2}))
+
+
+def _athena_direto(sql: str, timeout_s: int = 90) -> list:
+    """Roda o SQL no Athena (mesmo banco e workgroup do alerta) e devolve o ResultSet (1ª linha = cabeçalho)."""
+    athena = get_athena()
+    qid = athena.start_query_execution(
+        QueryString=sql, QueryExecutionContext={"Database": ATHENA_DATABASE}, WorkGroup=ATHENA_WORKGROUP,
+    )["QueryExecutionId"]
+    limite = time.time() + timeout_s
+    while True:
+        status = athena.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"]
+        if status["State"] == "SUCCEEDED":
+            break
+        if status["State"] in ("FAILED", "CANCELLED"):
+            raise _SqlFalhou(f"Athena terminou com {status['State']}: {status.get('StateChangeReason', 'sem detalhe')}")
+        if time.time() > limite:
+            raise _SqlFalhou("A consulta demorou mais que o esperado.")
+        time.sleep(1)
+    linhas, token = [], None
+    while True:
+        args = {"QueryExecutionId": qid, **({"NextToken": token} if token else {})}
+        pagina = athena.get_query_results(**args)
+        linhas += pagina["ResultSet"]["Rows"]
+        token = pagina.get("NextToken")
+        if not token:
+            return linhas
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_bv(sql: str) -> dict:
+    """SQL fixo da aba de boas-vindas. Direto no Athena; sem permissão, pede à state machine o mesmo SQL."""
+    try:
+        return {"sql": sql, "rows": _athena_direto(sql)}
+    except (ClientError, BotoCoreError) as exc:
+        resultado = generate_reply("Execute exatamente este SQL no Athena, sem alterá-lo, e devolva as linhas:\n" + sql)
+        if not resultado.get("sql"):
+            raise RuntimeError(f"{exc} | {resultado['content']}") from exc
+        return resultado
+
+
+CSS_BV = """
+<style>
+.g-bv-hero { display: flex; flex-direction: column; align-items: center; text-align: center; margin: var(--spacing-16) 0 var(--section-gap); }
+.g-bv-hero .g-brand { align-items: center; }
+.g-bv-hero .g-logo-img { height: 170px; margin: 0 auto var(--spacing-24); }
+.g-bv-hero .g-sub { margin-left: auto; margin-right: auto; }
+.g-bv-hero .g-cta { justify-content: center; }
+.g-mudancas { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--spacing-16);
+  margin: var(--spacing-16) 0 var(--spacing-24); }
+.g-mud, .g-mov { background: var(--surface-card); border-radius: var(--radius-cards); padding: var(--card-padding);
+  display: flex; flex-direction: column; gap: var(--spacing-12); }
+.g-mud.nossa { box-shadow: inset 0 0 0 1.5px var(--color-brand); }
+.g-mud-topo, .g-mov-topo { display: flex; justify-content: space-between; align-items: center; gap: var(--spacing-8); }
+.g-mud-nome { font-size: var(--text-subheading); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-subheading); }
+.g-mud.nossa .g-mud-nome { color: var(--color-brand); }
+.g-mud-datas, .g-chip { font-size: var(--text-caption); line-height: 1.5; letter-spacing: 0; color: var(--color-graphite);
+  border: 1px solid rgba(128,128,128,.35); border-radius: var(--radius-tags); padding: 1px var(--spacing-12); white-space: nowrap; }
+.g-chip.nossa { border-color: var(--color-brand); color: var(--color-brand); font-weight: var(--font-weight-semibold); }
+.g-mud-grande { font-size: var(--text-heading); line-height: var(--leading-heading); letter-spacing: var(--tracking-heading);
+  font-weight: var(--font-weight-semibold); }
+.g-pv { font-weight: var(--font-weight-semibold); letter-spacing: 0; white-space: nowrap; }
+.g-pv.cai { color: __UP__; }
+.g-pv.sobe { color: __DOWN__; }
+.g-pv.igual { color: var(--color-slate-mid); }
+.g-barra { height: 8px; border-radius: 8px; background: rgba(128,128,128,.3); overflow: hidden; }
+.g-barra i { display: block; height: 100%; background: var(--color-brand); border-radius: 8px; }
+.g-mov-nome { font-weight: var(--font-weight-semibold); line-height: 1.3; min-height: 2.6em; }
+.g-lado.dois { grid-template-columns: repeat(2, 1fr); }
+.g-regua-seg { position: absolute; top: 38px; height: 4px; border-radius: 4px; }
+.g-bv-legenda { font-size: var(--text-caption); letter-spacing: 0; color: var(--color-slate-mid); margin: var(--spacing-4) 0 0; }
+</style>
+""".replace("__UP__", UP_COR).replace("__DOWN__", DOWN_COR)
+
+
+def _num(v) -> str:
+    try:
+        return f"{int(round(float(v))):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _dia(v) -> str:
+    """'2026-10-16' ou '16/10/2026' → '16/10'."""
+    t = str(v or "").strip()[:10]
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", t)
+    if m:
+        return f"{m.group(3)}/{m.group(2)}"
+    m = re.fullmatch(r"(\d{2})/(\d{2})/\d{4}", t)
+    return f"{m.group(1)}/{m.group(2)}" if m else (t or "—")
+
+
+def _saudacao() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour
+    except Exception:
+        h = datetime.now().hour
+    return "Bom dia" if h < 12 else ("Boa tarde" if h < 18 else "Boa noite")
+
+
+def pv_html(pct) -> str:
+    """Variação de preço: ↓ verde (caiu), ↑ vermelho (subiu)."""
+    if pd.isna(pct):
+        return '<span class="g-pv igual">—</span>'
+    if pct > 0.05:
+        return f'<span class="g-pv sobe">↑ {fmt_valor(pct, "pct")}</span>'
+    if pct < -0.05:
+        return f'<span class="g-pv cai">↓ {fmt_valor(abs(pct), "pct")}</span>'
+    return '<span class="g-pv igual">→ 0%</span>'
+
+
+def preparar_resumo(bruto):
+    if bruto is None or bruto.shape[1] < 8:
+        return None
+    d = bruto.iloc[:, :8].copy()
+    d.columns = BV_RESUMO["colunas"]
+    for c in ("produtos", "alterados", "novos", "removidos", "variacao_media_pct"):
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["farmacia", "produtos"])
+    d["_o"] = d["farmacia"].map({f: i for i, f in enumerate(FARMACIAS)}).fillna(9)
+    d = d.sort_values("_o").drop(columns="_o")
+    return d.reset_index(drop=True) if not d.empty else None
+
+
+def preparar_mudancas(bruto):
+    if bruto is None or bruto.shape[1] < 5:
+        return None
+    d = bruto.iloc[:, :5].copy()
+    d.columns = BV_MUDANCAS["colunas"]
+    for c in ("preco_anterior", "preco_atual"):
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["produto", "preco_anterior", "preco_atual"])
+    d = d[(d["preco_anterior"] > 0) & (d["preco_atual"] > 0) & (d["preco_anterior"] != d["preco_atual"])]
+    d["variacao_pct"] = (d["preco_atual"] - d["preco_anterior"]) / d["preco_anterior"] * 100
+    d = d.reindex(d["variacao_pct"].abs().sort_values(ascending=False).index)
+    return d.head(6).reset_index(drop=True) if not d.empty else None
+
+
+def _caixa(rotulo: str, valor, extra: str = "") -> str:
+    return (f'<div class="g-col {extra}"><div class="g-col-nome">{rotulo}</div>'
+            f'<div class="g-col-preco">{_num(valor)}</div></div>')
+
+
+def card_farmacia(r) -> str:
+    """Cartão por farmácia: variação média, alterados/novos/removidos e % do catálogo que mudou."""
+    total, alt = r["produtos"], r["alterados"]
+    pct = (alt / total * 100) if total and pd.notna(alt) else 0.0
+    nossa = " nossa" if r["farmacia"] == "Farmazids" else ""
+    return (
+        f'<div class="g-mud{nossa}"><div class="g-mud-topo"><span class="g-mud-nome">{esc(str(r["farmacia"]))}</span>'
+        f'<span class="g-mud-datas">{_dia(r["coleta_anterior"])} → {_dia(r["coleta_atual"])}</span></div>'
+        f'<div><div class="g-mud-grande">{pv_html(r["variacao_media_pct"])}</div>'
+        f'<div class="g-cap">variação média dos preços que mudaram</div></div>'
+        f'<div class="g-lado">{_caixa("Alterados", alt, "nossa" if nossa else "")}{_caixa("Novos", r["novos"])}'
+        f'{_caixa("Removidos", r["removidos"])}</div>'
+        f'<div><div class="g-barra"><i style="width:{min(pct, 100):.1f}%"></i></div>'
+        f'<div class="g-regua-ext" style="margin:6px 0 0"><span>{fmt_valor(pct, "pct")} do catálogo mudou de preço</span>'
+        f'<span>{_num(total)} produtos</span></div></div></div>'
+    )
+
+
+def regua_mov(antes: float, agora: float) -> str:
+    """Régua de movimento: ponto cinza (antes) → ponto roxo (agora), com o trecho colorido pela direção."""
+    lo, hi = min(antes, agora), max(antes, agora)
+    pos = lambda p: 50.0 if hi - lo < 0.005 else 6 + (p - lo) / (hi - lo) * 88
+    xa, xb = pos(antes), pos(agora)
+    cor = UP_COR if agora < antes else DOWN_COR
+    return (
+        '<div class="g-regua"><div class="g-regua-trilho"></div>'
+        f'<div class="g-regua-seg" style="left:{min(xa, xb):.1f}%;width:{abs(xa - xb):.1f}%;background:{cor}"></div>'
+        f'<div class="g-regua-marca" style="left:{xa:.1f}%" title="Antes: {_rs(antes)}"></div>'
+        f'<div class="g-regua-marca nossa" style="left:{xb:.1f}%" title="Agora: {_rs(agora)}"></div>'
+        f'<div class="g-regua-rot b0" style="left:{min(max(xa, 12), 88):.1f}%">antes</div>'
+        f'<div class="g-regua-rot topo" style="left:{min(max(xb, 12), 88):.1f}%">agora</div></div>'
+    )
+
+
+def card_mudanca(r) -> str:
+    nossa = " nossa" if r["farmacia"] == "Farmazids" else ""
+    return (
+        f'<div class="g-mov"><div class="g-mov-topo"><span class="g-chip{nossa}">{esc(str(r["farmacia"]))}</span>'
+        f'{pv_html(r["variacao_pct"])}</div><div class="g-mov-nome">{esc(str(r["produto"]))}</div>'
+        f'<div class="g-lado dois"><div class="g-col"><div class="g-col-nome">Antes</div>'
+        f'<div class="g-col-preco">{_rs(r["preco_anterior"])}</div></div>'
+        f'<div class="g-col nossa"><div class="g-col-nome">Agora</div>'
+        f'<div class="g-col-preco">{_rs(r["preco_atual"])}</div></div></div>'
+        f'{regua_mov(r["preco_anterior"], r["preco_atual"])}</div>'
+    )
+
+
+def render_boas_vindas():
+    """Primeira tela após o login: saudação + o que mudou entre as duas últimas extrações de preços."""
+    st.markdown(CSS_DESTAQUES + CSS_BV, unsafe_allow_html=True)
+    saud = _saudacao()
+    nome = str(st.session_state.get("usuario") or "").split("@")[0].replace(".", " ").replace("_", " ").strip().title()
+    ola = f"{saud}, <em>{esc(nome)}</em>" if nome else f"{saud}!"
+    st.markdown(
+        f'<div class="g-bv-hero"><div class="g-brand">{load_logo()}<span class="g-tag">Boas-vindas</span></div>'
+        f'<h1 class="g-title" style="font-size:clamp(40px,6vw,64px)">{ola}</h1>'
+        f'<p class="g-sub">Veja o que mudou nos preços entre as duas últimas extrações de cada farmácia.</p>'
+        f'<div class="g-cta"><a class="g-btn fill" href="#novidades">Ver o que mudou</a></div></div>'
+        f'<div id="novidades"><h2 class="g-section">O que mudou</h2>'
+        f'<p class="g-cap">Comparação entre a extração mais recente e a anterior de cada farmácia. O preço considerado é o menor entre o preço sem desconto e o pix, em média no dia.</p>'
+        f'<p class="g-bv-legenda">↓ o preço caiu · ↑ o preço subiu</p></div>',
+        unsafe_allow_html=True,
+    )
+    resumo = mudancas = None
+    consultas = []  # só aparecem no modo diagnóstico (?debug=1)
+    try:
+        with carregando("Buscando o que mudou..."):
+            try:
+                r1 = run_bv(BV_RESUMO["sql"])
+                resumo = preparar_resumo(rows_to_df(r1.get("rows") or []))
+                consultas.append(("Resumo por farmácia", r1))
+            except RuntimeError as exc:
+                st.warning(f"Não consegui montar o resumo por farmácia: {exc}")
+            try:
+                r2 = run_bv(BV_MUDANCAS["sql"])
+                mudancas = preparar_mudancas(rows_to_df(r2.get("rows") or []))
+                consultas.append(("Maiores mudanças de preço", r2))
+            except RuntimeError as exc:
+                st.warning(f"Não consegui montar as maiores mudanças de preço: {exc}")
+    except Exception as exc:  # noqa: BLE001 - a tela de boas-vindas nunca deve derrubar o app
+        st.warning(f"Não foi possível carregar as novidades agora: {exc}")
+
+    if resumo is not None:
+        st.markdown('<div class="g-mudancas">' + "".join(card_farmacia(r) for _, r in resumo.iterrows()) + "</div>",
+                    unsafe_allow_html=True)
+    if mudancas is not None:
+        st.markdown('<h2 class="g-section" style="font-size:var(--text-heading);margin-top:var(--spacing-24)">'
+                    'Maiores mudanças de preço</h2>'
+                    f'<p class="g-cap">Os produtos que mais variaram de uma extração para a outra (variação de {BV_LIMITE_PCT}% ou mais).</p>',
+                    unsafe_allow_html=True)
+        st.markdown('<div class="g-mudancas">' + "".join(card_mudanca(r) for _, r in mudancas.iterrows()) + "</div>",
+                    unsafe_allow_html=True)
+    if resumo is None and mudancas is None:
+        st.info("Ainda não há duas extrações para comparar.")
+
+    c1, c2, _ = st.columns([1.4, 1.2, 4], gap="small")
+    if c1.button("Conversar com o Zids", key="bv_chat", type="primary", use_container_width=True):
+        st.session_state.page = "chat"
+        st.rerun()
+    if c2.button("Ver insights", key="bv_insights", use_container_width=True):
+        st.session_state.page = "insights"
+        st.rerun()
+    if st.query_params.get("debug") == "1" and consultas:  # diagnóstico: abra o app com ?debug=1
+        with st.expander("Diagnóstico: SQL gerado e linhas brutas"):
+            for titulo, r in consultas:
+                st.markdown(f"**{titulo}**")
+                st.code(r["sql"], language="sql")
+                st.dataframe(rows_to_df(r.get("rows") or []), use_container_width=True, hide_index=True)
+
+
 def render_insights():
     c_txt, c_img = st.columns([1.3, 1], gap="large", vertical_alignment="center")
     with c_txt:
@@ -1570,6 +1966,10 @@ def render_insights():
     render_comparativo()
 
 
+
+if st.session_state.page == "inicio":
+    render_boas_vindas()
+    st.stop()
 
 if st.session_state.page == "insights":
     render_insights()
@@ -1805,23 +2205,96 @@ if st.session_state.page == "dados":
     st.stop()
 
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ---------- Vários chats: cada conversa tem o próprio histórico e, por isso, o próprio contexto ----------
+# O Zids só recebe as últimas trocas do chat ATIVO (montar_historico), então trocar de chat troca o contexto.
+TITULO_PADRAO = "Novo chat"
+
+
+def _criar_chat() -> str:
+    cid = uuid.uuid4().hex[:8]
+    st.session_state.chats[cid] = {"titulo": TITULO_PADRAO, "messages": [], "atualizado": time.time()}
+    st.session_state.chat_ativo = cid
+    return cid
+
+
+def _titulo_do_chat(pergunta: str, limite: int = 36) -> str:
+    t = " ".join(pergunta.split())
+    return t if len(t) <= limite else t[:limite].rstrip() + "…"
+
+
+def _rotulo_botao(texto: str) -> str:
+    """Escapa caracteres de markdown (e o $, lido como fórmula) no título que vira rótulo de botão."""
+    for ch in ("\\", "$", "*", "_", "`"):
+        texto = texto.replace(ch, "\\" + ch)
+    return texto
+
+
+if not st.session_state.get("chats"):
+    st.session_state.chats = {}
+    _criar_chat()
+elif st.session_state.get("chat_ativo") not in st.session_state.chats:
+    st.session_state.chat_ativo = max(st.session_state.chats, key=lambda c: st.session_state.chats[c]["atualizado"])
+
+if "sidebar_aberta" not in st.session_state:
+    st.session_state.sidebar_aberta = True
+
+if st.session_state.sidebar_aberta:
+    with st.sidebar:
+        # Força a barra a aparecer, mesmo que o Streamlit a tenha deixado recolhida no navegador (estado nativo)
+        st.markdown(
+            """<style>
+[data-testid="stSidebar"] { display: block !important; visibility: visible !important; transform: none !important;
+  margin-left: 0 !important; width: min(21rem, 85vw) !important; min-width: min(21rem, 85vw) !important; }
+[data-testid="stSidebarContent"], [data-testid="stSidebarUserContent"] { visibility: visible !important; opacity: 1 !important; }
+</style>""",
+            unsafe_allow_html=True,
+        )
+        topo, fechar = st.columns([0.8, 0.2], vertical_alignment="center", gap="small")
+        topo.markdown('<div class="g-label">Conversas</div>', unsafe_allow_html=True)
+        if fechar.button("«", key="fechar_chats", help="Recolher a barra de chats"):
+            st.session_state.sidebar_aberta = False
+            st.rerun()
+        if st.button("＋ Novo chat", key="novo_chat", type="primary", use_container_width=True):
+            if st.session_state.chats[st.session_state.chat_ativo]["messages"]:  # já está num chat vazio? então fica nele
+                _criar_chat()
+            st.rerun()
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        for cid, c in sorted(st.session_state.chats.items(), key=lambda kv: kv[1]["atualizado"], reverse=True):
+            ativo = cid == st.session_state.chat_ativo
+            col_t, col_x = st.columns([0.85, 0.15], vertical_alignment="center", gap="small")
+            if col_t.button(_rotulo_botao(c["titulo"]), key=f"chatsel{'_on' if ativo else ''}_{cid}", use_container_width=True):
+                st.session_state.chat_ativo = cid
+                st.rerun()
+            if col_x.button("✕", key=f"chatdel_{cid}", help="Excluir este chat"):
+                del st.session_state.chats[cid]
+                if not st.session_state.chats:
+                    _criar_chat()
+                st.rerun()
+else:
+    st.markdown('<style>[data-testid="stSidebar"] { display: none !important; }</style>', unsafe_allow_html=True)
+    if st.button("☰", key="abrir_chats", help="Abrir a barra de chats"):
+        st.session_state.sidebar_aberta = True
+        st.rerun()
+
+chat = st.session_state.chats[st.session_state.chat_ativo]
+mensagens = chat["messages"]
 
 clicked = None
-if not st.session_state.messages:
+if not mensagens:
     for i, text in enumerate(SUGGESTIONS):
         if st.button(text, key=f"sug_{i}"):
             clicked = text
 
-for m in st.session_state.messages:
+for m in mensagens:
     with st.chat_message(m["role"]):
         render_message(m)
 
 prompt = st.chat_input("Escreva sua pergunta") or clicked
 if prompt:
-    historico = montar_historico(st.session_state.messages)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    historico = montar_historico(mensagens)  # só as últimas trocas DESTE chat
+    mensagens.append({"role": "user", "content": prompt})
+    if chat["titulo"] == TITULO_PADRAO:
+        chat["titulo"] = _titulo_do_chat(prompt)
     with st.chat_message("user"):
         st.markdown(md_seguro(prompt))
     with st.chat_message("assistant"):
@@ -1830,7 +2303,6 @@ if prompt:
             reply["chart"] = wants_chart(prompt)
             reply["pergunta"] = prompt
         render_message(reply)
-    st.session_state.messages.append({"role": "assistant", **reply})
-    if clicked:
-        st.rerun()
-
+    mensagens.append({"role": "assistant", **reply})
+    chat["atualizado"] = time.time()
+    st.rerun()  # atualiza a barra lateral (título novo e chat mais recente no topo)
