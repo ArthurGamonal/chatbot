@@ -1,17 +1,21 @@
 import asyncio
 import base64
 import contextlib
+import functools
 import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import re
+import threading
 import time
 import unicodedata
 import uuid
 import wave
 from array import array
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html import escape as esc
 from pathlib import Path
@@ -559,7 +563,7 @@ if st.session_state.page == "chat":
 
 
 # ---------- Lógica do chat ----------
-@st.cache_resource
+@functools.lru_cache(maxsize=None)  # thread-safe; funciona também fora do Streamlit (threads dos insights)
 def get_sfn():
     # Credenciais vêm da cadeia padrão do boto3 (variáveis de ambiente, ~/.aws, IAM role)
     return boto3.client(
@@ -569,7 +573,7 @@ def get_sfn():
     )
 
 
-@st.cache_resource
+@functools.lru_cache(maxsize=None)
 def get_state_machine_type() -> str:
     if STATE_MACHINE_TYPE in ("EXPRESS", "STANDARD"):
         return STATE_MACHINE_TYPE
@@ -772,7 +776,9 @@ def build_chart(df: pd.DataFrame, pergunta: str):
     y = col_num[-1]
     valor = pd.to_numeric(df[y], errors="coerce")
     # Colunas de texto viram o rótulo (ex.: a farmácia). Se houver mais de uma, junta com " – "
-    rotulo = df[col_txt].astype(str).agg(" – ".join, axis=1) if col_txt else None
+    # valores vazios viram "Sem informação": no pandas novo eles seguem como número (NaN) e quebrariam o join
+    rotulo = (df[col_txt].fillna("Sem informação").apply(lambda l: " – ".join(map(str, l)), axis=1)
+              if col_txt else None)
 
     # 3) Há data: série no tempo (linhas ou barras agrupadas)
     if col_data is not None:
@@ -843,18 +849,483 @@ def md_seguro(texto) -> str:
     return str(texto or "").replace("\\$", "$").replace("$", "\\$")
 
 
-def render_message(m: dict):
+# ---------- Painel "Zids Intel": visual dos gráficos pedidos no chat ----------
+# Todo gráfico pedido no chat sai neste painel (claro por padrão; escuro quando o modo escuro está ligado).
+# Disponibilidade de produtos ganha o formato rosca + tabela por rede. Se algo der errado, o chat volta ao gráfico antigo.
+# Paleta roxo + dourado (cada rede tem uma cor fixa)
+PN_ROXO, PN_DOURADO, PN_LAVANDA = "#6d3fc0", "#c4a054", "#a98be0"
+PN_ROXO_ESC, PN_OURO_ESC = "#4a2b86", "#8c6d2a"
+PN_AZUL, PN_ROSA = PN_DOURADO, PN_LAVANDA  # FarmaPonte = dourado, Vera Cruz = lavanda
+if DARK:
+    PN_BG, PN_CARD, PN_LINHA = "#1c1528", "#241a33", "rgba(255,255,255,.10)"
+    PN_TEXTO, PN_MUDO, PN_GRADE = "#f2f0f7", "#a9a4b8", "rgba(255,255,255,.08)"
+    PN_TRILHO, PN_TAB_BG, PN_TAB_TX = "rgba(255,255,255,.10)", "#2e2342", "#e9ddff"
+    PN_ROXO_TX, PN_OURO_TX = "#b99cf0", "#d9b866"
+else:
+    PN_BG, PN_CARD, PN_LINHA = "#ffffff", "#faf8f5", "rgba(35,26,51,.12)"
+    PN_TEXTO, PN_MUDO, PN_GRADE = "#1c1c1e", "#676768", "rgba(35,26,51,.08)"
+    PN_TRILHO, PN_TAB_BG, PN_TAB_TX = "rgba(35,26,51,.08)", "#f1ebfb", PN_ROXO_ESC
+    PN_ROXO_TX, PN_OURO_TX = PN_ROXO_ESC, PN_OURO_ESC  # versões mais escuras, para texto legível no fundo claro
+PN_PALETA = [PN_ROXO, PN_DOURADO, PN_LAVANDA, PN_OURO_ESC, PN_ROXO_ESC, "#b8b0c8"]
+PN_REDES = {"farmazids": PN_ROXO, "farmaponte": PN_DOURADO, "veracruz": PN_LAVANDA}
+PN_REDES_TX = {"farmazids": PN_ROXO_TX, "farmaponte": PN_OURO_TX, "veracruz": PN_ROXO_TX}  # cor do nome na tabela
+PN_NOMES = {"farmazids": "Farmazids", "farmaponte": "FarmaPonte", "veracruz": "Vera Cruz"}
+
+_CSS_PAINEL = """
+<style>
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) {
+  background: __BG__ !important; border: 1px solid __LINHA__ !important; border-radius: 20px !important;
+  padding: 0 24px 22px !important; margin: 8px 0 4px; overflow: hidden; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stMarkdownContainer"],
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stMarkdownContainer"] p { color: __TEXTO__; }
+.pn-marker { display: none; }
+.pn-head { margin: 0 -24px; padding: 18px 24px 0; border-bottom: 1px solid __LINHA__; }
+.pn-title { font-size: 17px; font-weight: 600; color: __ROXOTX__; letter-spacing: -.2px; }
+.pn-sub { font-size: 12px; color: __MUDO__; margin: 2px 0 14px; letter-spacing: 0; }
+.pn-tabs { display: flex; gap: 6px; }
+.pn-tab { display: inline-flex; align-items: center; gap: 9px; padding: 9px 16px; font-size: 11px; letter-spacing: 1.2px;
+  font-weight: 600; color: __TABTX__; background: __TABBG__; border-radius: 10px 10px 0 0; text-transform: uppercase;
+  border-bottom: 2px solid #c4a054; }
+.pn-tab i { width: 7px; height: 7px; border-radius: 50%; background: var(--pn-dot, #c4a054); }
+.pn-sec { display: flex; align-items: center; gap: 12px; font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase;
+  color: __MUDO__; font-weight: 600; margin: 6px 0 0; }
+.pn-sec::after { content: ""; flex: 1; height: 1px; background: __LINHA__; }
+.pn-pills { display: inline-flex; gap: 4px; padding: 4px; background: __TRILHO__; border-radius: 12px; margin-top: 12px; }
+.pn-pill { padding: 7px 18px; border-radius: 9px; font-size: 12px; color: __MUDO__; letter-spacing: 0; }
+.pn-pill.on { background: #6d3fc0; color: #fff; font-weight: 600; }
+.pn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
+.pn-card { background: __CARD__; border: 1px solid __LINHA__; border-radius: 14px; padding: 18px 14px; text-align: center; }
+.pn-card-v { font-size: 24px; font-weight: 600; letter-spacing: -.5px; line-height: 1.2; }
+.pn-card-l { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase; color: __MUDO__; margin-top: 4px; }
+.pn-leg { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 18px; font-size: 12px; color: __MUDO__; letter-spacing: 0; }
+.pn-leg i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 7px; vertical-align: -1px; }
+.pn-nota { font-size: 11.5px; color: __MUDO__; letter-spacing: 0; text-align: center; }
+.pn-av { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 28px; align-items: start; }
+.pn-donut-box { display: flex; flex-direction: column; align-items: center; gap: 16px; margin-top: 18px; }
+.pn-donut { position: relative; width: 190px; height: 190px; border-radius: 50%; display: grid; place-items: center; }
+.pn-donut::before { content: ""; position: absolute; inset: 27px; border-radius: 50%; background: __BG__; }
+.pn-donut-in { position: relative; text-align: center; line-height: 1.1; }
+.pn-donut-in b { display: block; font-size: 34px; font-weight: 700; color: __TEXTO__; letter-spacing: -1px; }
+.pn-donut-in span { font-size: 11px; letter-spacing: 1.2px; color: __MUDO__; text-transform: uppercase; }
+.pn-tab-box { background: __CARD__; border: 1px solid __LINHA__; border-radius: 14px; overflow: hidden; margin-top: 14px; }
+.pn-row { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1.1fr; align-items: center; gap: 8px; padding: 12px 16px;
+  font-size: 13px; letter-spacing: 0; border-top: 1px solid __LINHA__; color: __TEXTO__; }
+.pn-row.h { border-top: none; font-size: 10.5px; letter-spacing: 1.2px; color: __MUDO__; text-transform: uppercase; font-weight: 600; background: __TABBG__; }
+.pn-bar { display: block; height: 6px; border-radius: 6px; background: __TRILHO__; overflow: hidden; }
+.pn-bar i { display: block; height: 100%; border-radius: 6px; }
+/* Seletor da modalidade de preço (Padrão / PIX / Cartão), quando a resposta traz mais de um preço */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stButtonGroup"] {
+  background: __TRILHO__; border-radius: 12px; padding: 4px; width: fit-content; gap: 4px; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stButtonGroup"] button {
+  background: transparent !important; border: none !important; border-radius: 9px !important; padding: 6px 18px; color: __MUDO__ !important; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stButtonGroup"] button p { color: inherit !important; font-size: 12px; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stBaseButton-segmented_controlActive"] {
+  background: #6d3fc0 !important; color: #fff !important; font-weight: 600; }
+[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stRadio"] label p { color: __TEXTO__ !important; }
+</style>
+"""
+CSS_PAINEL = (_CSS_PAINEL.replace("__BG__", PN_BG).replace("__LINHA__", PN_LINHA).replace("__TEXTO__", PN_TEXTO)
+              .replace("__MUDO__", PN_MUDO).replace("__TABBG__", PN_TAB_BG).replace("__TABTX__", PN_TAB_TX)
+              .replace("__TRILHO__", PN_TRILHO).replace("__CARD__", PN_CARD).replace("__ROXOTX__", PN_ROXO_TX))
+
+
+def _ph(txt) -> str:
+    """Texto seguro para HTML dentro do st.markdown (escapa e troca o $ para não virar fórmula)."""
+    return esc(str(txt)).replace("$", "&#36;")
+
+
+def _rede_chave(nome):
+    k = _sem_acento(nome).replace(" ", "")
+    return next((r for r in PN_REDES if r in k), None)
+
+
+def _cor_rede(nome, i: int = 0) -> str:
+    chave = _rede_chave(nome)
+    return PN_REDES[chave] if chave else PN_PALETA[i % len(PN_PALETA)]
+
+
+def _e_rede(valores) -> bool:
+    return any(_rede_chave(v) for v in valores)
+
+
+def _pct_txt(x: float) -> str:
+    return f"{round(x)}%" if abs(x - round(x)) <= 0.05 else fmt_valor(x, "pct")
+
+
+def _fmt_painel(v, fmt: str) -> str:
+    if fmt == "dec":
+        return fmt_valor(v, "dinheiro").replace("R$ ", "")
+    return fmt_valor(v, fmt)
+
+
+def _fmt_valores(coluna: str, valores: pd.Series) -> str:
+    n = _sem_acento(coluna)
+    if any(k in n for k in ("preco", "valor", "faturamento", "receita", "custo", "ticket")):
+        return "dinheiro"
+    if "pct" in n or "percent" in n:
+        return "pct"
+    v = valores.dropna()
+    return "int" if v.empty or (v % 1 == 0).all() else "dec"
+
+
+def _modalidade(nome: str):
+    t = _sem_acento(nome)
+    if "pix" in t:
+        return "PIX"
+    if "cartao" in t or "parcel" in t:
+        return "Cartão"
+    if "sem_desconto" in t or "sem desconto" in t or "padrao" in t:
+        return "Padrão"
+    return None
+
+
+def _classificar_colunas(df: pd.DataFrame):
+    """Separa as colunas em data, números e texto (mesma regra do build_chart)."""
+    col_data, fmt, col_num, col_txt = None, None, [], []
+    for c in df.columns:
+        vals = df[c].dropna().astype(str)
+        if vals.empty:
+            col_txt.append(c)
+            continue
+        formato = _formato_data(vals)
+        nums = pd.to_numeric(vals, errors="coerce")
+        looks_like_id = vals.str.fullmatch(r"\d{8,}").all() or any(k in c.lower() for k in ("gtin", "codigo", "id_"))
+        if col_data is None and formato:
+            col_data, fmt = c, formato
+        elif nums.notna().all() and not looks_like_id:
+            col_num.append(c)
+        else:
+            col_txt.append(c)
+    return col_data, fmt, col_num, col_txt
+
+
+def _rotulos(df: pd.DataFrame, col_txt: list, padrao: str = "Total") -> pd.Series:
+    """Rótulo de cada linha: colunas de texto juntas com ' – ' (vazio vira 'Sem informação')."""
+    if not col_txt:
+        return pd.Series(padrao if padrao == "Total" else (df.index + 1).astype(str), index=df.index)
+    return df[col_txt].fillna("Sem informação").apply(lambda l: " – ".join(map(str, l)), axis=1)
+
+
+def _ticks_bonitos(vmin: float, vmax: float, n: int = 6) -> list:
+    """Valores 'redondos' para o eixo y (ex.: 11, 11,5, 12...), cobrindo de vmin a vmax."""
+    if vmax <= vmin:
+        vmax = vmin + (abs(vmin) * 0.1 or 1.0)
+    bruto = (vmax - vmin) / n
+    exp = math.floor(math.log10(bruto))
+    f = bruto / 10 ** exp
+    passo = (1 if f <= 1 else 2 if f <= 2 else 2.5 if f <= 2.5 else 5 if f <= 5 else 10) * 10 ** exp
+    ini, fim = math.floor(vmin / passo) * passo, math.ceil(vmax / passo) * passo
+    return [round(ini + i * passo, 10) for i in range(int(round((fim - ini) / passo)) + 1)]
+
+
+def _eixo_y(ticks: list, fmt: str):
+    """Eixo y com rótulos no padrão brasileiro (R$ 14,00), grade bem suave e sem linha de borda."""
+    rotulos = [_fmt_painel(t, fmt) for t in ticks]
+    expr = f"{json.dumps(rotulos, ensure_ascii=False)}[indexof({json.dumps(ticks)}, datum.value)]"
+    return alt.Axis(values=ticks, labelExpr=expr, grid=True, gridColor=PN_GRADE, domain=False, ticks=False, title=None,
+                    labelColor=PN_MUDO, labelFont="Geist", labelPadding=8)
+
+
+def _eixo_x(angulo: int = 0):
+    return alt.Axis(labelAngle=angulo, labelLimit=170, labelColor=PN_MUDO, labelFont="Geist", ticks=False,
+                    domain=False, grid=False, labelPadding=8)
+
+
+def _alt_barras(d: pd.DataFrame, fmt: str):
+    """Barras largas com preenchimento translúcido e borda da cor da rede (como no modelo)."""
+    n = len(d)
+    ticks = _ticks_bonitos(min(0.0, float(d["valor"].min())), max(float(d["valor"].max()), 0.0))
+    base = alt.Chart(d).encode(
+        x=alt.X("rotulo:N", sort=None, title=None, scale=alt.Scale(paddingInner=0.35, paddingOuter=0.25),
+                axis=_eixo_x(0 if n <= 4 else -30)),
+        y=alt.Y("valor:Q", title=None, scale=alt.Scale(domain=[ticks[0], ticks[-1]], nice=False), axis=_eixo_y(ticks, fmt)),
+        tooltip=[alt.Tooltip("rotulo:N", title="Item"), alt.Tooltip("texto:N", title="Valor")],
+    )
+    camada = base.mark_bar(cornerRadiusTopLeft=7, cornerRadiusTopRight=7, fillOpacity=0.28, strokeWidth=1.6).encode(
+        color=alt.Color("cor:N", scale=None, legend=None), stroke=alt.Stroke("cor:N", scale=None, legend=None))
+    if n > 4:  # sem cartões de valor, o número aparece em cima de cada barra
+        camada = camada + base.mark_text(dy=-9, color=PN_TEXTO, font="Geist", fontSize=11).encode(text="texto:N")
+    return camada.properties(height=300, background="rgba(0,0,0,0)").configure_view(stroke=None)
+
+
+def _alt_serie(d: pd.DataFrame, series: list, cores: list, fmt: str, fmt_rot: str, tipo: str):
+    """Evolução no tempo (linhas ou barras agrupadas) no mesmo estilo."""
+    zero = tipo != "linha"
+    lo, hi = float(d["valor"].min()), float(d["valor"].max())
+    ticks = _ticks_bonitos(min(0.0, lo) if zero else lo, max(hi, 0.0) if zero else hi)
+    escala = alt.Scale(domain=series, range=cores)
+    y = alt.Y("valor:Q", title=None, scale=alt.Scale(domain=[ticks[0], ticks[-1]], nice=False), axis=_eixo_y(ticks, fmt))
+    dica = [alt.Tooltip("periodo:N", title="Período"), alt.Tooltip("serie:N", title="Série"), alt.Tooltip("texto:N", title="Valor")]
+    if tipo == "linha":
+        ch = alt.Chart(d).mark_line(strokeWidth=2.5, point=True).encode(
+            x=alt.X("x:T", title=None, axis=alt.Axis(format=fmt_rot, labelAngle=0, grid=False, domain=False, ticks=False,
+                                                     labelColor=PN_MUDO, labelFont="Geist", labelPadding=8)),
+            y=y, color=alt.Color("serie:N", scale=escala, legend=None), tooltip=dica)
+    else:
+        ordem = list(d.sort_values("x")["periodo"].drop_duplicates())
+        ch = alt.Chart(d).mark_bar(cornerRadiusTopLeft=6, cornerRadiusTopRight=6, fillOpacity=0.28, strokeWidth=1.6).encode(
+            x=alt.X("periodo:O", sort=ordem, title=None, scale=alt.Scale(paddingInner=0.3), axis=_eixo_x(-30 if len(ordem) > 4 else 0)),
+            y=y, color=alt.Color("serie:N", scale=escala, legend=None), stroke=alt.Stroke("serie:N", scale=escala, legend=None),
+            tooltip=dica)
+        if len(series) > 1:
+            ch = ch.encode(xOffset=alt.XOffset("serie:N"))
+    return ch.properties(height=300, background="rgba(0,0,0,0)").configure_view(stroke=None)
+
+
+def _conic(fatias: list) -> str:
+    """Gradiente cônico da rosca, com uma fresta escura entre as fatias."""
+    total = sum(v for v, _ in fatias) or 1.0
+    ac, partes = 0.0, []
+    for v, cor in fatias:
+        ini = ac / total * 100
+        ac += v
+        fim = ac / total * 100
+        corte = max(fim - 0.5, ini)
+        partes.append(f"{cor} {ini:.2f}% {corte:.2f}%, {PN_BG} {corte:.2f}% {fim:.2f}%")
+    return "conic-gradient(" + ", ".join(partes) + ")"
+
+
+def _donut_html(fatias: list, centro: str, rotulo_centro: str, legenda: str) -> str:
+    return (f'<div class="pn-donut-box"><div class="pn-donut" style="background:{_conic(fatias)}">'
+            f'<div class="pn-donut-in"><b>{_ph(centro)}</b><span>{_ph(rotulo_centro)}</span></div></div>'
+            f'<div class="pn-leg">{legenda}</div></div>')
+
+
+def _cards_html(itens: list) -> str:
+    return '<div class="pn-cards">' + "".join(
+        f'<div class="pn-card"><div class="pn-card-v" style="color:{cor}">{_ph(valor)}</div>'
+        f'<div class="pn-card-l">{_ph(rotulo)}</div></div>' for valor, rotulo, cor in itens) + "</div>"
+
+
+def _status_disp(v):
+    t = _sem_acento(v)
+    if any(p in t for p in ("indispon", "esgot", "sem estoque", "ruptura")):
+        return "ind"
+    if "dispon" in t or "em estoque" in t:
+        return "disp"
+    return None
+
+
+def _dados_disponibilidade(df: pd.DataFrame, col_txt: list, col_num: list):
+    """Se o resultado fala de disponibilidade, devolve uma tabela por rede com as colunas disp e ind; senão None."""
+    if not col_num:
+        return None
+    achou = None
+    for c in col_txt:
+        marcados = df[c].dropna().astype(str).map(_status_disp)
+        if marcados.notna().any() and marcados.notna().mean() >= 0.5:
+            achou = c
+            break
+    if achou is not None:  # formato longo: rede, situação, quantidade
+        outras = [c for c in col_txt if c != achou]
+        rede = df[outras[0]].fillna("Sem informação").astype(str) if outras else pd.Series("Total", index=df.index)
+        t = pd.DataFrame({"rede": rede, "st": df[achou].map(lambda v: _status_disp(v) if pd.notna(v) else None),
+                          "n": pd.to_numeric(df[col_num[-1]], errors="coerce")}).dropna(subset=["st", "n"])
+        if t.empty:
+            return None
+        g = t.pivot_table(index="rede", columns="st", values="n", aggfunc="sum", fill_value=0, sort=False)
+        g = g.reindex(columns=["disp", "ind"], fill_value=0)
+    else:  # formato largo: rede, disponíveis, indisponíveis
+        c_d = next((c for c in col_num if "dispon" in _sem_acento(c) and "indispon" not in _sem_acento(c)), None)
+        c_i = next((c for c in col_num if "indispon" in _sem_acento(c) or "esgot" in _sem_acento(c)), None)
+        if not (c_d and c_i):
+            return None
+        rede = df[col_txt[0]].fillna("Sem informação").astype(str) if col_txt else pd.Series("Total", index=df.index)
+        t = pd.DataFrame({"rede": rede, "disp": pd.to_numeric(df[c_d], errors="coerce"),
+                          "ind": pd.to_numeric(df[c_i], errors="coerce")}).dropna()
+        if t.empty:
+            return None
+        g = t.groupby("rede", sort=False)[["disp", "ind"]].sum()
+    g = g[(g["disp"] + g["ind"]) > 0]
+    return g if not g.empty else None
+
+
+def _html_disponibilidade(g: pd.DataFrame) -> str:
+    """Rosca com a disponibilidade geral + tabela de disponibilidade por rede."""
+    redes = list(g.index)
+    disp, ind = float(g["disp"].sum()), float(g["ind"].sum())
+    geral = disp / (disp + ind) * 100
+    if len(redes) > 1:
+        fatias = [(float(g.loc[r, "disp"]), _cor_rede(r, i)) for i, r in enumerate(redes)]
+        legenda = "".join(f'<span><i style="background:{c}"></i>{_ph(r)}</span>' for (_, c), r in zip(fatias, redes))
+    else:
+        fatias = [(disp, PN_ROXO), (ind, PN_DOURADO)]
+        legenda = (f'<span><i style="background:{PN_ROXO}"></i>Disponível</span>'
+                   f'<span><i style="background:{PN_DOURADO}"></i>Indisponível</span>')
+    linhas = ""
+    for i, r in enumerate(redes):
+        d_, i_ = float(g.loc[r, "disp"]), float(g.loc[r, "ind"])
+        pdisp = d_ / (d_ + i_) * 100
+        cor = _cor_rede(r, i)
+        chave = _rede_chave(r)
+        cor_txt = PN_REDES_TX[chave] if chave else PN_ROXO_TX
+        largura = max(min(pdisp, 100.0), 2.0)
+        linhas += (f'<div class="pn-row"><span style="color:{cor_txt};font-weight:600">{_ph(r)}</span>'
+                   f'<span style="color:{PN_ROXO_TX};font-weight:600">{_pct_txt(pdisp)}</span>'
+                   f'<span style="font-weight:500">{fmt_valor(d_, "int")}</span>'
+                   f'<span class="pn-bar"><i style="width:{largura:.1f}%;background:{cor}"></i></span></div>')
+    return ('<div class="pn-av"><div><div class="pn-sec">Share de presença e disponibilidade</div>'
+            + _donut_html(fatias, _pct_txt(geral), "Disponível", legenda) + '</div>'
+            '<div><div class="pn-sec">Disponibilidade por rede</div><div class="pn-tab-box">'
+            '<div class="pn-row h"><span>Farmácia</span><span>Disponível</span><span>Produtos</span><span>Barra</span></div>'
+            + linhas + '</div></div></div>')
+
+
+def _plano_painel(df: pd.DataFrame, pergunta: str, mod=None):
+    """Decide o que o painel mostra (sem chamar o Streamlit). Devolve None se não der para montar."""
+    col_data, fmt_data, col_num, col_txt = _classificar_colunas(df)
+    if not col_num:
+        return None
+
+    g = _dados_disponibilidade(df, col_txt, col_num)
+    if g is not None:
+        return {"tab": "Disponibilidade", "dot": PN_DOURADO, "mod_atual": None,
+                "blocos": [("html", _html_disponibilidade(g))]}
+
+    # modalidades de preço (ex.: preco_sem_desconto, preco_desconto_pix): viram um seletor Padrão / PIX / Cartão
+    mods = {}
+    for c in col_num:
+        m = _modalidade(c)
+        if m and m not in mods:
+            mods[m] = c
+    ordem_mod = [m for m in ("Padrão", "PIX", "Cartão") if m in mods]
+    usar_toggle = len(ordem_mod) >= 2
+    mod_atual = (mod if mod in ordem_mod else ordem_mod[0]) if usar_toggle else None
+    y = mods[mod_atual] if usar_toggle else col_num[-1]
+    valor_all = pd.to_numeric(df[y], errors="coerce")
+    fmt = _fmt_valores(y, valor_all)
+    dinheiro = fmt == "dinheiro"
+    q = _sem_acento(pergunta)
+    y_legivel = y.replace("_", " ")
+
+    blocos = []
+    if usar_toggle:
+        blocos += [("html", '<div class="pn-sec">Modalidade de preço</div>'), ("toggle", ordem_mod)]
+    elif dinheiro:
+        m = _modalidade(y) or ("PIX" if "pix" in q else ("Cartão" if "cartao" in q else None))
+        if m:
+            blocos.append(("html", f'<div class="pn-sec">Modalidade de preço</div><div class="pn-pills"><span class="pn-pill on">{m}</span></div>'))
+
+    pedido = tipo_pedido(pergunta)
+    cor_tab = PN_DOURADO if dinheiro else PN_ROXO
+
+    # ----- série no tempo -----
+    if col_data is not None:
+        d = pd.DataFrame({"x": pd.to_datetime(df[col_data], format=fmt_data, errors="coerce"), "valor": valor_all,
+                          "serie": _rotulos(df, col_txt)}).dropna(subset=["x", "valor"])
+        if d.empty:
+            return None
+        fmt_rot = "%m/%Y" if fmt_data == "%Y-%m" else "%d/%m"
+        d["periodo"] = d["x"].dt.strftime(fmt_rot)
+        series = list(dict.fromkeys(d["serie"]))
+        eh_rede = _e_rede(series)
+        cores = [_cor_rede(s, i) if eh_rede else PN_PALETA[i % len(PN_PALETA)] for i, s in enumerate(series)]
+        d["texto"] = d["valor"].map(lambda v: _fmt_painel(v, fmt))
+        tipo = pedido if pedido in ("barras", "linha") else ("linha" if d["x"].nunique() > 12 else "barras")
+        if len(series) <= 4:
+            itens = []
+            for s, c in zip(series, cores):
+                ult = d[d["serie"] == s].sort_values("x").iloc[-1]
+                itens.append((ult["texto"], s if s != "Total" else y_legivel, c))
+            blocos.append(("html", _cards_html(itens)))
+        blocos.append(("html", f'<div class="pn-sec">{"Evolução de preços" if dinheiro else "Evolução por período"}</div>'))
+        blocos.append(("chart", _alt_serie(d, series, cores, fmt, fmt_rot, tipo)))
+        if len(series) > 1:
+            blocos.append(("html", '<div class="pn-leg">' + "".join(
+                f'<span><i style="background:{c}"></i>{_ph(s)}</span>' for s, c in zip(series, cores)) + "</div>"))
+        return {"tab": "Evolução de preços" if dinheiro else "Evolução no tempo", "dot": cor_tab, "blocos": blocos, "mod_atual": mod_atual}
+
+    # ----- comparação entre itens (barras) ou participação (rosca) -----
+    d = pd.DataFrame({"rotulo": _rotulos(df, col_txt, padrao="indice"), "valor": valor_all}).dropna(subset=["valor"]).reset_index(drop=True)
+    if d.empty:
+        return None
+    n = len(d)
+    eh_rede = _e_rede(d["rotulo"])
+    d["cor"] = [_cor_rede(r, i) if eh_rede else PN_ROXO for i, r in enumerate(d["rotulo"])]
+    d["texto"] = d["valor"].map(lambda v: _fmt_painel(v, fmt))
+
+    if pedido == "pizza" and n <= 8 and (d["valor"] > 0).all():
+        total = float(d["valor"].sum())
+        cores_p = list(d["cor"]) if eh_rede else [PN_PALETA[i % len(PN_PALETA)] for i in range(n)]
+        legenda = "".join(f'<span><i style="background:{c}"></i>{_ph(r)} · {_pct_txt(v / total * 100)}</span>'
+                          for r, v, c in zip(d["rotulo"], d["valor"], cores_p))
+        blocos.append(("html", '<div class="pn-sec">Distribuição</div>'))
+        blocos.append(("html", _donut_html(list(zip(d["valor"], cores_p)), _fmt_painel(total, fmt), "Total", legenda)))
+        return {"tab": "Distribuição", "dot": cor_tab, "blocos": blocos, "mod_atual": mod_atual}
+
+    nota = ""
+    if destaca_barato(pergunta) and n > 1:  # a opção mais barata em dourado
+        d.loc[d["valor"].idxmin(), "cor"] = GOLD
+        nota = "Em dourado: a opção mais barata."
+    if n <= 4:
+        blocos.append(("html", _cards_html(list(zip(d["texto"], d["rotulo"], d["cor"])))))
+    blocos.append(("html", f'<div class="pn-sec">{"Comparativo por farmácia" if eh_rede else "Comparativo de " + _ph(y_legivel)}</div>'))
+    blocos.append(("chart", _alt_barras(d, fmt)))
+    chaves = list(dict.fromkeys(k for k in (_rede_chave(r) for r in d["rotulo"]) if k))
+    if eh_rede and chaves:
+        blocos.append(("html", '<div class="pn-leg">' + "".join(
+            f'<span><i style="background:{PN_REDES[k]}"></i>{PN_NOMES[k]}</span>' for k in chaves) + "</div>"))
+    if nota:
+        blocos.append(("html", f'<div class="pn-nota">{nota}</div>'))
+    return {"tab": "Comparativo de preços" if dinheiro else "Comparativo", "dot": cor_tab, "blocos": blocos, "mod_atual": mod_atual}
+
+
+def _toggle_modalidade(opcoes: list, chave: str, padrao: str) -> str:
+    if hasattr(st, "segmented_control"):
+        sel = st.segmented_control("Modalidade de preço", opcoes, default=padrao, key=chave, label_visibility="collapsed")
+    else:  # Streamlit mais antigo
+        sel = st.radio("Modalidade de preço", opcoes, index=opcoes.index(padrao), key=chave, horizontal=True,
+                       label_visibility="collapsed")
+    return sel or padrao
+
+
+def painel_grafico(df: pd.DataFrame, pergunta: str, uid: str = "0") -> bool:
+    """Desenha o painel e devolve True. Devolve False (sem desenhar nada) se não houver como montar o gráfico."""
+    if df is None or df.empty:
+        return False
+    plano = _plano_painel(df, pergunta)
+    if plano is None:
+        return False
+    st.markdown(CSS_PAINEL, unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown('<div class="pn-marker"></div><div class="pn-head"><div class="pn-title">Zids Intel</div>'
+                    '<div class="pn-sub">Análise de mercado em tempo real · Athena</div>'
+                    f'<div class="pn-tabs"><span class="pn-tab" style="--pn-dot:{plano["dot"]}"><i></i>{_ph(plano["tab"])}</span></div></div>',
+                    unsafe_allow_html=True)
+        i = 0
+        while i < len(plano["blocos"]):
+            tipo, conteudo = plano["blocos"][i]
+            if tipo == "html":
+                st.markdown(conteudo, unsafe_allow_html=True)
+            elif tipo == "chart":
+                st.altair_chart(conteudo, use_container_width=True, theme=None)
+            elif tipo == "toggle":
+                escolha = _toggle_modalidade(conteudo, f"pn_mod_{uid}", plano["mod_atual"])
+                if escolha != plano["mod_atual"]:  # outra modalidade: refaz os blocos seguintes com a nova coluna de preço
+                    plano = _plano_painel(df, pergunta, mod=escolha) or plano
+            i += 1
+    return True
+
+
+def render_message(m: dict, uid: str = "0"):
     st.markdown(md_seguro(m["content"]))
     df = rows_to_df(m.get("rows") or []) if m.get("sql") else None
     if m.get("chart"):
-        chart = build_chart(df, m.get("pergunta", "")) if df is not None else None
-        if chart is not None:
-            st.altair_chart(tema_escuro(chart.properties(height=320)), use_container_width=True,
-                            theme=None if DARK else "streamlit")
-            if destaca_barato(m.get("pergunta", "")) and _tipo_marca(chart) == "bar":
-                st.caption("Em dourado: a opção mais barata.")
-        elif pediu_grafico(m.get("pergunta", "")):
-            st.info("Não há dados numéricos suficientes para montar um gráfico com essa pergunta.")
+        painel_ok = False
+        if df is not None:
+            try:  # gráfico no painel "Zids Intel"; se algo falhar, cai no gráfico antigo logo abaixo
+                painel_ok = painel_grafico(df, m.get("pergunta", ""), uid)
+            except Exception:  # noqa: BLE001
+                painel_ok = False
+        if not painel_ok:
+            chart = build_chart(df, m.get("pergunta", "")) if df is not None else None
+            if chart is not None:
+                st.altair_chart(tema_escuro(chart.properties(height=320)), use_container_width=True,
+                                theme=None if DARK else "streamlit")
+                if destaca_barato(m.get("pergunta", "")) and _tipo_marca(chart) == "bar":
+                    st.caption("Em dourado: a opção mais barata.")
+            elif pediu_grafico(m.get("pergunta", "")):
+                st.info("Não há dados numéricos suficientes para montar um gráfico com essa pergunta.")
     if m.get("sql"):
         with st.expander("Ver consulta e dados"):
             st.code(m["sql"], language="sql")
@@ -1118,12 +1589,59 @@ def grafico_fixo(d: pd.DataFrame, spec: dict):
     return final
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def run_insight(pergunta: str) -> dict:
+# ---------- Insights em paralelo + pré-carregamento ----------
+# Cada consulta é um "future" guardado por pergunta: quem pedir a mesma pergunta (a página Insights, o PDF,
+# o pré-carregamento do login) reaproveita a que já está rodando ou pronta, sem repetir a chamada.
+INSIGHT_TTL_S = 3600  # os resultados valem por 1 hora
+
+
+@st.cache_resource
+def _insight_store() -> dict:
+    """Pool de threads e consultas (em andamento ou prontas); um só para todo o app, compartilhado entre sessões."""
+    return {"lock": threading.Lock(), "itens": {},
+            "pool": ThreadPoolExecutor(max_workers=6, thread_name_prefix="insight")}
+
+
+def _consultar_insight(pergunta: str) -> dict:
+    """Roda numa thread de fundo: não pode chamar nada do Streamlit (st.*)."""
     resultado = generate_reply(pergunta)
-    if not resultado.get("sql"):  # não guarda erros no cache
+    if not resultado.get("sql"):  # erro não é guardado: na próxima vez a consulta é refeita
         raise RuntimeError(resultado["content"])
     return resultado
+
+
+def _insight_future(pergunta: str):
+    """Future da pergunta: reaproveita o existente (rodando, pronto e dentro do prazo) ou dispara um novo."""
+    store = _insight_store()
+    with store["lock"]:
+        item = store["itens"].get(pergunta)
+        if item is not None:
+            fut, inicio = item
+            if fut.done() and (fut.exception() is not None or time.time() - inicio > INSIGHT_TTL_S):
+                item = None  # deu erro ou venceu o prazo: refaz
+        if item is None:
+            fut = store["pool"].submit(_consultar_insight, pergunta)
+            store["itens"][pergunta] = (fut, time.time())
+            return fut
+        return item[0]
+
+
+def run_insight(pergunta: str) -> dict:
+    """Resultado da pergunta; espera se ainda estiver rodando. Erros levantam RuntimeError (como antes)."""
+    return _insight_future(pergunta).result()
+
+
+def iniciar_insights():
+    """Dispara TODAS as consultas dos insights ao mesmo tempo (as já prontas ou em andamento são reaproveitadas)."""
+    for pergunta in [s["pergunta"] for s in INSIGHTS] + [COMPARATIVO["pergunta"]]:
+        _insight_future(pergunta)
+
+
+def limpar_insights():
+    """Botão 'Atualizar dados': esquece tudo para as consultas rodarem de novo."""
+    store = _insight_store()
+    with store["lock"]:
+        store["itens"].clear()
 
 
 def render_tabela(bruto: pd.DataFrame, spec: dict) -> bool:
@@ -1761,7 +2279,7 @@ class _SqlFalhou(RuntimeError):
     """A consulta rodou no Athena mas falhou (erro de SQL, tempo esgotado...)."""
 
 
-@st.cache_resource
+@functools.lru_cache(maxsize=None)
 def get_athena():
     return boto3.client("athena", region_name=AWS_REGION,
                         config=Config(read_timeout=60, connect_timeout=10, retries={"max_attempts": 2}))
@@ -2187,6 +2705,7 @@ def render_boas_vindas():
 
 
 def render_insights():
+    iniciar_insights()  # dispara as 6 consultas juntas; os cards abaixo só esperam o resultado
     c_txt, c_img = st.columns([1.3, 1], gap="large", vertical_alignment="center")
     with c_txt:
         st.markdown(
@@ -2198,7 +2717,7 @@ def render_insights():
         )
         b1, b2, b3 = st.columns([1, 0.9, 1.1])
         if b1.button("Atualizar dados", key="refresh_insights"):
-            run_insight.clear()
+            limpar_insights()
             st.session_state.pop("pdf_insights", None)
             st.rerun()
         if b2.button("Gerar PDF", key="gerar_pdf"):
@@ -2284,12 +2803,30 @@ SIM_CSS = """
 
 SIM_CSS_ESCURO = """
 <style>
-/* Campos menos claros no modo escuro: fundo roxo-acinzentado em vez de branco */
+/* Campos no modo escuro: pinta o campo inteiro (o último bloco do widget, depois do rótulo) e tudo que há dentro dele.
+   Não depende dos nomes internos do BaseWeb, que mudam entre versões do Streamlit. */
+[data-testid="stTextInput"] > div:last-child, [data-testid="stTextInput"] > div:last-child div,
+[data-testid="stNumberInput"] > div:last-child, [data-testid="stNumberInput"] > div:last-child div,
+[data-testid="stSelectbox"] > div:last-child, [data-testid="stSelectbox"] > div:last-child div,
+[data-testid="stTextInput"] [data-baseweb="input"], [data-testid="stTextInput"] [data-baseweb="base-input"],
+[data-testid="stNumberInput"] [data-baseweb="input"], [data-testid="stNumberInput"] [data-baseweb="base-input"],
+[data-testid="stSelectbox"] [data-baseweb="select"], [data-testid="stSelectbox"] [data-baseweb="select"] div {
+  background-color: #2a2236 !important; background-image: none !important; }
 [data-testid="stTextInput"] [data-baseweb="input"], [data-testid="stNumberInput"] [data-baseweb="input"],
-[data-testid="stSelectbox"] [data-baseweb="select"] > div {
-  background-color: #2a2236 !important; border: 1px solid rgba(255,255,255,.14) !important; }
-[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stSelectbox"] [data-baseweb="select"] * {
-  background-color: transparent !important; color: #e6e1f0 !important; -webkit-text-fill-color: #e6e1f0 !important; }
+[data-testid="stSelectbox"] [data-baseweb="select"] > div { border: 1px solid rgba(255,255,255,.14) !important; }
+/* Texto digitado, valor escolhido e placeholder */
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stSelectbox"] input,
+[data-testid="stSelectbox"] > div:last-child * {
+  color: #e6e1f0 !important; -webkit-text-fill-color: #e6e1f0 !important; caret-color: #e6e1f0 !important; }
+[data-testid="stNumberInput"] input, [data-testid="stSelectbox"] input { background-color: transparent !important; }
+/* Campo de texto (Buscar medicamento): pinta o próprio input e os dois blocos que o envolvem, seja qual for o nome interno */
+input[type="text"], input[type="search"] {
+  background-color: #2a2236 !important; color: #e6e1f0 !important; -webkit-text-fill-color: #e6e1f0 !important;
+  caret-color: #e6e1f0 !important; border-radius: 8px; }
+div:has(> input[type="text"]), div:has(> div > input[type="text"]),
+div:has(> input[type="search"]), div:has(> div > input[type="search"]) {
+  background-color: #2a2236 !important; background-image: none !important; border-color: rgba(255,255,255,.14) !important; }
+input[type="text"]:-webkit-autofill { -webkit-box-shadow: 0 0 0 1000px #2a2236 inset !important; -webkit-text-fill-color: #e6e1f0 !important; }
 [data-testid="stTextInput"] input::placeholder, [data-testid="stNumberInput"] input::placeholder { color: #a9a4b8 !important; -webkit-text-fill-color: #a9a4b8 !important; }
 [data-testid="stSelectbox"] svg, [data-testid="stNumberInput"] svg { color: #c9c5d3 !important; fill: #c9c5d3 !important; }
 [data-testid="stNumberInput"] button { background-color: #3a3048 !important; color: #c9c5d3 !important; }
@@ -2551,6 +3088,12 @@ def render_simulador():
             for sql in (sql_busca_produto(termo), sql_precos_produto(gtin), sql_unidades_mes(gtin)):
                 st.code(sql, language="sql")
 
+
+# Pré-carrega os insights em segundo plano assim que a pessoa entra (uma vez por sessão):
+# quando ela abrir a aba Insights, as consultas já estão prontas ou quase.
+if not st.session_state.get("insights_pre"):
+    st.session_state.insights_pre = True
+    iniciar_insights()
 
 if st.session_state.page == "inicio":
     render_boas_vindas()
@@ -2991,7 +3534,7 @@ def render_dados():
         unsafe_allow_html=True,
     )
     if st.button("Atualizar dados", key="refresh_dados"):
-        run_insight.clear()
+        limpar_insights()
         st.rerun()
     st.markdown('<div style="height:16px"></div>', unsafe_allow_html=True)
 
@@ -3201,9 +3744,9 @@ if not mensagens:
         if st.button(text, key=f"sug_{i}"):
             clicked = text
 
-for m in mensagens:
+for i_msg, m in enumerate(mensagens):
     with st.chat_message(m["role"]):
-        render_message(m)
+        render_message(m, uid=f"{st.session_state.chat_ativo}_{i_msg}")
 
 voz_box = st.empty()
 with voz_box.container():
@@ -3223,7 +3766,7 @@ if prompt:
             reply = generate_reply(prompt, historico)
             reply["chart"] = wants_chart(prompt)
             reply["pergunta"] = prompt
-        render_message(reply)
+        render_message(reply, uid=f"{st.session_state.chat_ativo}_{len(mensagens)}")
     mensagens.append({"role": "assistant", **reply})
     chat["atualizado"] = time.time()
     st.rerun()  # atualiza a barra lateral (título novo e chat mais recente no topo)
