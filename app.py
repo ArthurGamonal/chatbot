@@ -1406,7 +1406,10 @@ CSS_DESTAQUES = """
 .g-prods { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: var(--spacing-16); margin: var(--spacing-16) 0 var(--spacing-24); }
 .g-prod { background: var(--surface-card); border-radius: var(--radius-cards); padding: var(--card-padding);
   display: flex; flex-direction: column; gap: var(--spacing-16); }
-.g-prod-nome { font-weight: var(--font-weight-semibold); line-height: 1.3; }
+/* min-height de 2 linhas (2 x 1.3 de line-height): nomes curtos ganham uma "linha vazia" e os cartões ficam alinhados.
+   O line-clamp corta em 2 linhas os nomes muito longos, para que nenhum cartão passe disso. */
+.g-prod-nome { font-weight: var(--font-weight-semibold); line-height: 1.3; min-height: 2.6em;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .g-prod-status { align-self: flex-start; font-size: var(--text-caption); line-height: 1.4; letter-spacing: 0;
   border-radius: var(--radius-tags); padding: var(--spacing-4) var(--spacing-12); }
 .g-prod-status.ok { background: rgba(196,160,84,.22); color: var(--color-gold-deep); font-weight: var(--font-weight-semibold); }
@@ -1490,7 +1493,7 @@ LEGENDA_PRECO = ('<div class="g-legenda"><span><i class="ouro"></i>Menor preço<
                  '<span><i class="roxo"></i>Farmazids</span><span><i class="cinza"></i>Concorrentes</span></div>')
 
 COMPARATIVO = {
-    "titulo": "Preço por produto",
+    "titulo": "Preço dos best-sellers",
     "colunas": ["produto", "Farmazids", "FarmaPonte", "VeraCruz"],
     "pergunta": (
         "Pegue 6 produtos da Farmazids (tabela medicamentos_farmazids, coluna preco, só a coleta mais recente, "
@@ -1646,9 +1649,7 @@ def render_comparativo():
         return
     cartoes = "".join(card_produto(row["produto"], {f: row[f] for f in FARMACIAS}) for _, row in d.iterrows())
     st.markdown(f'<div class="g-prods">{cartoes}</div>', unsafe_allow_html=True)
-    with st.container(border=True):
-        st.markdown('<div class="g-label">Preço por farmácia</div>', unsafe_allow_html=True)
-        st.altair_chart(grafico_comparativo(d), use_container_width=False, theme=None if DARK else "streamlit")
+    # (o gráfico de barras "Preço por farmácia" foi removido: dizia o mesmo que a régua dos cartões)
     with st.expander("Ver tabela e consulta"):
         if r.get("content"):
             st.markdown(md_seguro(r["content"]))
