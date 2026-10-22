@@ -388,6 +388,11 @@ html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
 [data-testid="stVerticalBlockBorderWrapper"] { border-color: rgba(255,255,255,.14) !important; }
 [data-testid="stExpander"] details { border-color: rgba(255,255,255,.14) !important; background: transparent !important; }
 [data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: #f2f0f7 !important; }
+[data-testid="stExpander"] summary, [data-testid="stExpander"] details[open] > summary,
+[data-testid="stExpander"] details > summary { background-color: #1c1528 !important; border-radius: 8px; }
+[data-testid="stExpander"] summary:hover { background-color: #2a2236 !important; }
+[data-testid="stExpander"] summary svg { color: #f2f0f7 !important; fill: #f2f0f7 !important; }
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] { background: transparent !important; }
 [data-testid="stCode"], [data-testid="stCode"] pre, [data-testid="stCode"] code { background: #2a2236 !important; }
 [data-testid="stCode"] * { color: #e6e1f0 !important; }
 [data-testid="stDataFrame"] { filter: invert(0.92) hue-rotate(180deg); }
@@ -873,11 +878,11 @@ PN_NOMES = {"farmazids": "Farmazids", "farmaponte": "FarmaPonte", "veracruz": "V
 
 _CSS_PAINEL = """
 <style>
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) {
+__W__ {
   background: __BG__ !important; border: 1px solid __LINHA__ !important; border-radius: 20px !important;
   padding: 0 24px 22px !important; margin: 8px 0 4px; overflow: hidden; }
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stMarkdownContainer"],
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stMarkdownContainer"] p { color: __TEXTO__; }
+__W__ [data-testid="stMarkdownContainer"],
+__W__ [data-testid="stMarkdownContainer"] p { color: __TEXTO__; }
 .pn-marker { display: none; }
 .pn-head { margin: 0 -24px; padding: 18px 24px 0; border-bottom: 1px solid __LINHA__; }
 .pn-title { font-size: 17px; font-weight: 600; color: __ROXOTX__; letter-spacing: -.2px; }
@@ -914,19 +919,40 @@ _CSS_PAINEL = """
 .pn-bar { display: block; height: 6px; border-radius: 6px; background: __TRILHO__; overflow: hidden; }
 .pn-bar i { display: block; height: 100%; border-radius: 6px; }
 /* Seletor da modalidade de preço (Padrão / PIX / Cartão), quando a resposta traz mais de um preço */
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stButtonGroup"] {
-  background: __TRILHO__; border-radius: 12px; padding: 4px; width: fit-content; gap: 4px; }
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stButtonGroup"] button {
-  background: transparent !important; border: none !important; border-radius: 9px !important; padding: 6px 18px; color: __MUDO__ !important; }
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stButtonGroup"] button p { color: inherit !important; font-size: 12px; }
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stBaseButton-segmented_controlActive"] {
+__W__ [data-testid="stButtonGroup"], __W__ [data-baseweb="button-group"] {
+  background: __TRILHO__ !important; border-radius: 12px; padding: 4px; width: fit-content; gap: 4px; }
+__W__ button {
+  background: transparent !important; border: none !important; box-shadow: none !important;
+  border-radius: 9px !important; padding: 6px 18px; color: __MUDO__ !important; }
+__W__ button p { color: inherit !important; font-size: 12px; }
+__W__ button[data-testid="stBaseButton-segmented_controlActive"], __W__ button[kind="segmented_controlActive"],
+__W__ button[aria-checked="true"], __W__ button[aria-pressed="true"] {
   background: #6d3fc0 !important; color: #fff !important; font-weight: 600; }
-[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker) [data-testid="stRadio"] label p { color: __TEXTO__ !important; }
+__W__ [data-testid="stRadio"] label p { color: __TEXTO__ !important; }
 </style>
 """
 CSS_PAINEL = (_CSS_PAINEL.replace("__BG__", PN_BG).replace("__LINHA__", PN_LINHA).replace("__TEXTO__", PN_TEXTO)
               .replace("__MUDO__", PN_MUDO).replace("__TABBG__", PN_TAB_BG).replace("__TABTX__", PN_TAB_TX)
               .replace("__TRILHO__", PN_TRILHO).replace("__CARD__", PN_CARD).replace("__ROXOTX__", PN_ROXO_TX))
+
+def _expandir_css_painel(css: str) -> str:
+    """Cada regra que começa em __W__ vale para o container com chave (st-key-pnbox...) e para o seletor antigo."""
+    ws = ['[class*="st-key-pnbox"]', '[data-testid="stVerticalBlockBorderWrapper"]:has(.pn-marker)']
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    saida = []
+    for parte in css.split("}"):
+        if "{" not in parte:
+            saida.append(parte)
+            continue
+        seletores, corpo = parte.split("{", 1)
+        if "__W__" in seletores:
+            lista = [s.strip() for s in seletores.split(",") if s.strip()]
+            seletores = ",\n".join(s.replace("__W__", w) for s in lista for w in ws)
+        saida.append(seletores + "{" + corpo)
+    return "}".join(saida)
+
+
+CSS_PAINEL = _expandir_css_painel(CSS_PAINEL)
 
 
 def _ph(txt) -> str:
@@ -1236,7 +1262,10 @@ def _plano_painel(df: pd.DataFrame, pergunta: str, mod=None):
         return {"tab": "Evolução de preços" if dinheiro else "Evolução no tempo", "dot": cor_tab, "blocos": blocos, "mod_atual": mod_atual}
 
     # ----- comparação entre itens (barras) ou participação (rosca) -----
-    d = pd.DataFrame({"rotulo": _rotulos(df, col_txt, padrao="indice"), "valor": valor_all}).dropna(subset=["valor"]).reset_index(drop=True)
+    todos = pd.DataFrame({"rotulo": _rotulos(df, col_txt, padrao="indice"), "valor": valor_all})
+    # redes sem preço na modalidade escolhida (ex.: a Farmazids só tem um preço, sem PIX nem cartão)
+    sem_preco = list(dict.fromkeys(todos.loc[todos["valor"].isna(), "rotulo"])) if usar_toggle else []
+    d = todos.dropna(subset=["valor"]).reset_index(drop=True)
     if d.empty:
         return None
     n = len(d)
@@ -1265,6 +1294,9 @@ def _plano_painel(df: pd.DataFrame, pergunta: str, mod=None):
     if eh_rede and chaves:
         blocos.append(("html", '<div class="pn-leg">' + "".join(
             f'<span><i style="background:{PN_REDES[k]}"></i>{PN_NOMES[k]}</span>' for k in chaves) + "</div>"))
+    if sem_preco:
+        aviso = "Sem preço nesta modalidade: " + ", ".join(_ph(r) for r in sem_preco) + "."
+        nota = f"{nota} {aviso}" if nota else aviso
     if nota:
         blocos.append(("html", f'<div class="pn-nota">{nota}</div>'))
     return {"tab": "Comparativo de preços" if dinheiro else "Comparativo", "dot": cor_tab, "blocos": blocos, "mod_atual": mod_atual}
@@ -1287,7 +1319,12 @@ def painel_grafico(df: pd.DataFrame, pergunta: str, uid: str = "0") -> bool:
     if plano is None:
         return False
     st.markdown(CSS_PAINEL, unsafe_allow_html=True)
-    with st.container(border=True):
+    chave_box = "pnbox-" + re.sub(r"[^A-Za-z0-9_]", "_", str(uid))
+    try:  # container com chave: ganha a classe st-key-pnbox..., que o CSS do painel usa (Streamlit 1.39+)
+        caixa = st.container(border=True, key=chave_box)
+    except TypeError:  # Streamlit antigo, sem o parâmetro key
+        caixa = st.container(border=True)
+    with caixa:
         st.markdown('<div class="pn-marker"></div><div class="pn-head"><div class="pn-title">Zids Intel</div>'
                     '<div class="pn-sub">Análise de mercado em tempo real · Athena</div>'
                     f'<div class="pn-tabs"><span class="pn-tab" style="--pn-dot:{plano["dot"]}"><i></i>{_ph(plano["tab"])}</span></div></div>',
@@ -3638,9 +3675,26 @@ else:
 TRANSCRIBE_REGION = os.environ.get("TRANSCRIBE_REGION", AWS_REGION)
 VOZ_CSS_ESCURO = """
 <style>
+/* Gravador: o widget nativo é claro; invertemos só a caixa do gravador e devolvemos o rótulo ao normal */
+[data-testid="stAudioInput"] { filter: invert(0.92) hue-rotate(180deg); }
+[data-testid="stAudioInput"] [data-testid="stWidgetLabel"], [data-testid="stAudioInput"] label {
+  filter: invert(0.92) hue-rotate(180deg); }
+/* Caixa de texto da pergunta transcrita */
+[data-testid="stTextArea"] div:has(> textarea), [data-testid="stTextArea"] div:has(> div > textarea),
 [data-testid="stTextArea"] [data-baseweb="textarea"], [data-testid="stTextArea"] [data-baseweb="base-input"] {
-  background-color: #2a2236 !important; border: 1px solid rgba(255,255,255,.14) !important; }
-[data-testid="stTextArea"] textarea { background-color: transparent !important; color: #e6e1f0 !important; -webkit-text-fill-color: #e6e1f0 !important; }
+  background-color: #2a2236 !important; border-color: rgba(255,255,255,.18) !important; }
+[data-testid="stTextArea"] textarea {
+  background-color: #2a2236 !important; color: #f2f0f7 !important; -webkit-text-fill-color: #f2f0f7 !important;
+  caret-color: #f2f0f7; }
+[data-testid="stTextArea"] textarea::placeholder { color: #a9a4b8 !important; -webkit-text-fill-color: #a9a4b8 !important; }
+[data-testid="stTextArea"] label, [data-testid="stTextArea"] label * { color: #f2f0f7 !important; }
+/* Botões Enviar pergunta / Descartar */
+[class*="st-key-voz_env"] button { background: #6d3fc0 !important; color: #ffffff !important; border: none !important; }
+[class*="st-key-voz_env"] button p { color: #ffffff !important; }
+[class*="st-key-voz_env"] button:disabled { opacity: .45; }
+[class*="st-key-voz_desc"] button { background: transparent !important; color: #f2f0f7 !important;
+  border: 1px solid rgba(255,255,255,.28) !important; }
+[class*="st-key-voz_desc"] button p { color: #f2f0f7 !important; }
 </style>
 """
 
