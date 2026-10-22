@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import uuid
 from datetime import datetime
 from html import escape as esc
@@ -320,6 +321,13 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .st-key-nav_inicio button[kind="primary"], .st-key-nav_inicio button[data-testid="stBaseButton-primary"] {
   background: var(--color-gold); border-color: var(--color-gold); box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4); }
 .st-key-nav_inicio button[kind="primary"] p, .st-key-nav_inicio button[data-testid="stBaseButton-primary"] p { color: var(--color-pine-shadow); }
+/* Aba Simulador do topo, em dourado como as demais */
+.st-key-nav_simulador button { background: transparent; border: 1px solid var(--color-gold-deep); box-shadow: none; border-radius: var(--radius-xl); }
+.st-key-nav_simulador button p { color: var(--color-gold-deep); }
+.st-key-nav_simulador button:hover { background: rgba(196,160,84,.15); border-color: var(--color-gold-deep); }
+.st-key-nav_simulador button[kind="primary"], .st-key-nav_simulador button[data-testid="stBaseButton-primary"] {
+  background: var(--color-gold); border-color: var(--color-gold); box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4); }
+.st-key-nav_simulador button[kind="primary"] p, .st-key-nav_simulador button[data-testid="stBaseButton-primary"] p { color: var(--color-pine-shadow); }
 </style>
 """,
     unsafe_allow_html=True,
@@ -511,10 +519,10 @@ if "page" not in st.session_state:
     st.session_state.page = "chat"
 
 # ---------- Topo: logo + botões de troca de página ----------
-c_logo, c_ini, c_chat, c_ins, c_dados, c_tema = st.columns([2.65, 1.4, 1.4, 1.4, 1.4, 0.85], vertical_alignment="center")
+c_logo, c_ini, c_chat, c_ins, c_sim, c_dados, c_tema = st.columns([1.25, 1.4, 1.4, 1.4, 1.4, 1.4, 0.85], vertical_alignment="center")
 c_logo.markdown(f'<div class="g-logo"><b>●</b> {BOT_NAME}</div>', unsafe_allow_html=True)
 for col, key, label in ((c_ini, "inicio", "Boas-vindas"), (c_chat, "chat", "Chatbot"),
-                        (c_ins, "insights", "Insights"), (c_dados, "dados", "Dados")):
+                        (c_ins, "insights", "Insights"), (c_sim, "simulador", "Simulador"), (c_dados, "dados", "Dados")):
     ativo = st.session_state.page == key
     if col.button(label, key=f"nav_{key}", type="primary" if ativo else "secondary", use_container_width=True):
         st.session_state.page = key
@@ -1967,12 +1975,306 @@ def render_insights():
 
 
 
+# ---------- Página: Simulador de preço ----------
+# O usuário escolhe um produto, informa o custo (ou a margem atual) e move o controle de variação:
+# o app mostra a posição da Farmazids frente à FarmaPonte e à Vera Cruz e quanto de margem se perde.
+# Três consultas (cacheadas por 1 h em run_bv), todas por GTIN e na coleta mais recente; a conta roda no app.
+SIM_CSS = """
+<style>
+.g-sim-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: var(--spacing-16); margin: var(--spacing-16) 0; }
+.g-sim-card { background: var(--surface-card); border-radius: var(--radius-cards); padding: var(--card-padding);
+  display: flex; flex-direction: column; gap: var(--spacing-4); }
+.g-sim-card.nossa { box-shadow: inset 0 0 0 1.5px var(--color-brand); }
+.g-sim-rot { font-size: var(--text-caption); line-height: 1.4; letter-spacing: 0; color: var(--color-slate-mid); text-transform: uppercase; }
+.g-sim-val { font-size: var(--text-heading); line-height: var(--leading-heading); letter-spacing: var(--tracking-heading);
+  font-weight: var(--font-weight-semibold); }
+.g-sim-val.perde { color: __DOWN__; }
+.g-sim-val.ganha { color: __UP__; }
+.g-sim-sub { font-size: var(--text-caption); line-height: 1.5; letter-spacing: 0; color: var(--color-graphite); }
+.g-sim-nota { font-size: var(--text-caption); letter-spacing: 0; color: var(--color-slate-mid); margin: var(--spacing-8) 0; }
+</style>
+""".replace("__UP__", UP_COR).replace("__DOWN__", DOWN_COR)
+
+SIM_CSS_ESCURO = """
+<style>
+/* Campos menos claros no modo escuro: fundo roxo-acinzentado em vez de branco */
+[data-testid="stTextInput"] [data-baseweb="input"], [data-testid="stNumberInput"] [data-baseweb="input"],
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+  background-color: #2a2236 !important; border: 1px solid rgba(255,255,255,.14) !important; }
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stSelectbox"] [data-baseweb="select"] * {
+  background-color: transparent !important; color: #e6e1f0 !important; -webkit-text-fill-color: #e6e1f0 !important; }
+[data-testid="stTextInput"] input::placeholder, [data-testid="stNumberInput"] input::placeholder { color: #a9a4b8 !important; -webkit-text-fill-color: #a9a4b8 !important; }
+[data-testid="stSelectbox"] svg, [data-testid="stNumberInput"] svg { color: #c9c5d3 !important; fill: #c9c5d3 !important; }
+[data-testid="stNumberInput"] button { background-color: #3a3048 !important; color: #c9c5d3 !important; }
+[data-testid="stNumberInput"] button:hover { background-color: #4a3d5e !important; }
+/* Lista que se abre no seletor de produto */
+[data-baseweb="popover"] ul, [data-baseweb="menu"] { background-color: #1c1528 !important; }
+[data-baseweb="popover"] li, [data-baseweb="menu"] li { background-color: transparent !important; color: #e6e1f0 !important; }
+[data-baseweb="popover"] li:hover, [data-baseweb="menu"] li:hover, [data-baseweb="menu"] li[aria-selected="true"] { background-color: #2a2236 !important; }
+</style>
+"""
+
+_MENOR_PRECO_SQL = ("LEAST(COALESCE(preco_sem_desconto, preco_desconto_pix), "
+                    "COALESCE(preco_desconto_pix, preco_sem_desconto))")
+
+
+def _dia_recente_sql(tabela: str) -> str:
+    dia = "date(date_parse(data_extracao, '%d/%m/%Y %H:%i'))"
+    return f"{dia} = (SELECT MAX({dia}) FROM {tabela})"
+
+
+def _termo_busca(texto: str) -> str:
+    """Texto digitado → padrão de LIKE sem acento (só letras, números e . + -; palavras viram %)."""
+    t = unicodedata.normalize("NFD", str(texto or "").lower())
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+    t = re.sub(r"[^a-z0-9 .+-]", " ", t)
+    return "%".join(t.split())
+
+
+def sql_busca_produto(termo: str) -> str:
+    """Produtos do catálogo da Farmazids (coleta mais recente) cujo nome contém o termo, sem diferenciar acento."""
+    return ("SELECT gtin, MAX(nome) AS nome FROM medicamentos_farmazids "
+            "WHERE regexp_replace(normalize(LOWER(nome), NFD), '\\p{M}', '') LIKE '%" + _termo_busca(termo) + "%' AND "
+            + _dia_recente_sql("medicamentos_farmazids") + " GROUP BY gtin ORDER BY 2 LIMIT 30")
+
+
+def sql_precos_produto(gtin: str) -> str:
+    """Preço do produto nas três farmácias (coleta mais recente), casado pelo GTIN."""
+    def bloco(rotulo: str, tabela: str, preco: str, disp: str) -> str:
+        return (f"SELECT '{rotulo}' AS farmacia, MAX(nome) AS nome, {preco} AS preco, {disp} AS disponibilidade, "
+                f"(SELECT date_format(MAX(date(date_parse(data_extracao, '%d/%m/%Y %H:%i'))), '%d/%m/%Y') FROM {tabela}) AS coleta "
+                f"FROM {tabela} WHERE gtin = '{gtin}' AND {_dia_recente_sql(tabela)}")
+    return " UNION ALL ".join([
+        bloco("Farmazids", "medicamentos_farmazids", "MAX(preco)", "CAST(NULL AS varchar)"),
+        bloco("FarmaPonte", "farmaponte_tratado", f"MIN({_MENOR_PRECO_SQL})", "MAX(disponibilidade)"),
+        bloco("VeraCruz", "veracruz_tratado", f"MIN({_MENOR_PRECO_SQL})", "MAX(disponibilidade)"),
+    ]) + " LIMIT 10"
+
+
+def sql_unidades_mes(gtin: str) -> str:
+    """Unidades vendidas pela Farmazids no mês da maior data_venda da carga mais recente."""
+    carga = '"$file_modified_time" = (SELECT MAX("$file_modified_time") FROM historico_farmazids)'
+    return ("SELECT SUM(h.quantidade_vendida) AS unidades, "
+            f"(SELECT date_format(MAX(data_venda), '%m/%Y') FROM historico_farmazids WHERE {carga}) AS mes "
+            f"FROM historico_farmazids h WHERE h.farmacia = 'farmazids' AND h.gtin = '{gtin}' AND h.{carga} "
+            f"AND date_format(h.data_venda, '%Y-%m') = "
+            f"(SELECT date_format(MAX(data_venda), '%Y-%m') FROM historico_farmazids WHERE {carga}) LIMIT 1")
+
+
+def _carregar_precos(gtin: str):
+    d = rows_to_df(run_bv(sql_precos_produto(gtin)).get("rows") or [])
+    if d is None or d.shape[1] < 5:
+        return None
+    d = d.iloc[:, :5].copy()
+    d.columns = ["farmacia", "nome", "preco", "disponibilidade", "coleta"]
+    d["preco"] = pd.to_numeric(d["preco"], errors="coerce")
+    return d.set_index("farmacia")
+
+
+def _carregar_unidades(gtin: str):
+    """(unidades, 'mm/aaaa') do último mês com vendas; (None, None) se não houver ou a consulta falhar."""
+    try:
+        d = rows_to_df(run_bv(sql_unidades_mes(gtin)).get("rows") or [])
+        if d is None or d.shape[1] < 2:
+            return None, None
+        u = pd.to_numeric(d.iloc[0, 0], errors="coerce")
+        return (None if pd.isna(u) else float(u)), d.iloc[0, 1]
+    except Exception:  # noqa: BLE001 - as unidades são opcionais: o simulador funciona sem elas
+        return None, None
+
+
+def _indisponivel(v) -> bool:
+    return any(p in str(v or "").lower() for p in ("indispon", "esgot", "sem estoque"))
+
+
+def simular(preco: float, var_pct: float, concorrentes: dict, custo=None, unidades: float = 0.0, ganho_pct: float = 0.0) -> dict:
+    """Posição no mercado e margem para um novo preço. Margem = (preço − custo) / preço."""
+    novo = round(preco * (1 + var_pct / 100), 2)
+    precos_c = {f: p for f, p in concorrentes.items() if pd.notna(p)}
+    posicao = lambda p: 1 + sum(1 for c in precos_c.values() if c < p - 0.005)
+    empate = lambda p: any(abs(c - p) < 0.005 for c in precos_c.values())
+    r = {
+        "novo": novo, "total": 1 + len(precos_c),
+        "pos_hoje": posicao(preco), "pos_novo": posicao(novo),
+        "empate_hoje": empate(preco), "empate_novo": empate(novo),
+        "menor_conc": min(precos_c.values()) if precos_c else None,
+        "igualar": {f: (p / preco - 1) * 100 for f, p in precos_c.items()},
+        "custo": None,
+    }
+    if custo is not None and custo > 0:
+        m_atual, m_novo = preco - custo, novo - custo
+        lucro_atual = unidades * m_atual
+        lucro_novo = unidades * (1 + ganho_pct / 100) * m_novo
+        r.update(
+            custo=custo, perda_un=preco - novo,
+            m_atual_un=m_atual, m_novo_un=m_novo,
+            m_atual_pct=m_atual / preco * 100, m_novo_pct=(m_novo / novo * 100) if novo > 0 else None,
+            lucro_atual=lucro_atual, lucro_novo=lucro_novo, delta=lucro_novo - lucro_atual,
+            equilibrio=((m_atual / m_novo - 1) * 100) if m_atual > 0 and m_novo > 0 else None,
+        )
+    return r
+
+
+def _pct_sinal(v: float) -> str:
+    return ("+" if v > 0.05 else "") + fmt_valor(v, "pct")
+
+
+def _card_sim(rotulo: str, valor: str, sub: str = "", cls: str = "", nossa: bool = False) -> str:
+    return (f'<div class="g-sim-card{" nossa" if nossa else ""}"><div class="g-sim-rot">{rotulo}</div>'
+            f'<div class="g-sim-val {cls}">{valor}</div><div class="g-sim-sub">{sub}</div></div>')
+
+
+def render_simulador():
+    st.markdown(CSS_DESTAQUES + CSS_BV + SIM_CSS + (SIM_CSS_ESCURO if DARK else ""), unsafe_allow_html=True)
+    st.markdown(
+        '<span class="g-tag">Simulador</span>'
+        '<h1 class="g-title" style="font-size:clamp(36px,5vw,56px)">Simulador de preço</h1>'
+        '<p class="g-sub">Teste “e se eu baixar X% neste produto?”: veja em que posição a Farmazids fica entre as '
+        'farmácias e quanto de margem se perde.</p>',
+        unsafe_allow_html=True,
+    )
+
+    termo = st.text_input("Buscar medicamento", key="sim_termo", placeholder="Ex.: dipirona 500mg, glifage, losartana",
+                          help="Busca no catálogo da Farmazids, sem diferenciar acentos. Aperte Enter para buscar.")
+    if len(_termo_busca(termo).replace("%", "")) < 2:
+        st.info("Digite ao menos 2 letras do nome do medicamento para começar.")
+        return
+    try:
+        with carregando("Buscando o medicamento..."):
+            achados = rows_to_df(run_bv(sql_busca_produto(termo)).get("rows") or [])
+    except RuntimeError as exc:
+        st.warning(f"Não consegui buscar o medicamento agora: {exc}")
+        return
+    if achados is None or achados.empty:
+        st.info("Nenhum medicamento do catálogo da Farmazids encontrado com esse nome.")
+        return
+    nomes = dict(zip(achados["gtin"], achados["nome"]))
+    gtin = st.selectbox("Produto", list(nomes), format_func=lambda g: nomes[g], key=f"sim_prod_{_termo_busca(termo)}",
+                        help=None if len(nomes) < 30 else "Mostrando os 30 primeiros: refine a busca para ver outros.")
+    if not re.fullmatch(r"\d{6,14}", str(gtin)):
+        st.warning("Este produto não tem um GTIN válido para comparar entre as farmácias.")
+        return
+
+    try:
+        with carregando("Consultando os preços..."):
+            precos = _carregar_precos(gtin)
+            unid_padrao, mes_ref = _carregar_unidades(gtin)
+    except RuntimeError as exc:
+        st.warning(f"Não consegui consultar os preços agora: {exc}")
+        return
+    if precos is None or pd.isna(precos.loc["Farmazids", "preco"] if "Farmazids" in precos.index else float("nan")):
+        st.warning("Não há preço da Farmazids para este produto na coleta mais recente.")
+        return
+
+    preco = float(precos.loc["Farmazids", "preco"])
+    conc = {f: (float(precos.loc[f, "preco"]) if f in precos.index and pd.notna(precos.loc[f, "preco"]) else float("nan"))
+            for f in FARMACIAS[1:]}
+    nome = str(precos.loc["Farmazids", "nome"] or nomes[gtin])
+    if not any(pd.notna(p) for p in conc.values()):
+        st.info("Nenhum concorrente tem este produto (mesmo GTIN) na coleta mais recente: não há posição para comparar.")
+        return
+
+    st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+    var = st.slider("Variação no preço da Farmazids", -30.0, 10.0, -5.0, 0.5, format="%.1f%%", key=f"sim_var_{gtin}")
+    if DARK:  # trilho dourado até o valor escolhido, resto em cinza-arroxeado
+        pos = (var + 30.0) / 40.0 * 100
+        st.markdown(
+            f"<style>.st-key-sim_var_{gtin} div[style*='linear-gradient'] {{ background: linear-gradient(to right, "
+            f"#d9b869 0%, #d9b869 {pos:.2f}%, rgba(255,255,255,.16) {pos:.2f}%, rgba(255,255,255,.16) 100%) !important; }}"
+            f".st-key-sim_var_{gtin} [role='slider'] {{ background-color: #d9b869 !important; box-shadow: none !important; }}"
+            f".st-key-sim_var_{gtin} [data-testid='stSliderThumbValue'] {{ color: #d9b869 !important; }}</style>",
+            unsafe_allow_html=True,
+        )
+
+    c1, c2, c3 = st.columns(3, gap="large")
+    modo = c1.radio("Informar o custo como", ["Custo unitário (R$)", "Margem atual (%)"], horizontal=True, key=f"sim_modo_{gtin}")
+    if modo.startswith("Custo"):
+        custo = c1.number_input("Custo unitário (R$)", min_value=0.0, value=None, step=0.5, format="%.2f", key=f"sim_custo_{gtin}")
+    else:
+        m = c1.number_input("Margem atual (%)", min_value=0.0, max_value=99.9, value=None, step=1.0, format="%.1f", key=f"sim_marg_{gtin}")
+        custo = None if m is None else preco * (1 - m / 100)
+    unidades = c2.number_input("Unidades vendidas por mês", min_value=0.0, value=float(unid_padrao or 0), step=1.0,
+                               format="%.0f", key=f"sim_unid_{gtin}",
+                               help=f"Preenchido com as vendas da Farmazids em {mes_ref}." if mes_ref and unid_padrao else
+                                    "Não encontrei vendas deste produto no histórico: informe o volume mensal.")
+    ganho = c3.number_input("Aumento esperado nas vendas (%)", min_value=-100.0, max_value=500.0, value=0.0, step=5.0,
+                            format="%.0f", key=f"sim_ganho_{gtin}", help="Efeito do novo preço sobre o volume. 0% = vende o mesmo.")
+
+    r = simular(preco, var, conc, custo, unidades, ganho)
+
+    # --- posição no mercado ---
+    st.markdown(f'<h2 class="g-section" style="font-size:var(--text-heading);margin-top:var(--spacing-24)">{esc(nome)}</h2>',
+                unsafe_allow_html=True)
+    ant, dep = st.columns(2, gap="medium")
+    ant.markdown('<div class="g-label">Hoje</div>', unsafe_allow_html=True)
+    ant.markdown(card_produto(nome, {"Farmazids": preco, **conc}), unsafe_allow_html=True)
+    dep.markdown(f'<div class="g-label">Com o novo preço ({_pct_sinal(var)})</div>', unsafe_allow_html=True)
+    dep.markdown(card_produto(nome, {"Farmazids": r["novo"], **conc}), unsafe_allow_html=True)
+
+    suf = lambda emp: " (empate)" if emp else ""
+    dif = r["novo"] - r["menor_conc"]
+    dif_txt = (f"{_rs(abs(dif))} {'abaixo' if dif < -0.005 else 'acima'} do concorrente mais barato"
+               if abs(dif) >= 0.005 else "igual ao concorrente mais barato")
+    cards = [
+        _card_sim("Posição no mercado", f'{r["pos_novo"]}º de {r["total"]}{suf(r["empate_novo"])}',
+                  f'hoje: {r["pos_hoje"]}º de {r["total"]}{suf(r["empate_hoje"])}', nossa=True),
+        _card_sim("Novo preço", _rs(r["novo"]), f'hoje {_rs(preco)} · {_rs(r["novo"] - preco)} por unidade'.replace("R$ -", "−R$ ")),
+        _card_sim("Frente ao mais barato", _rs(r["menor_conc"]), dif_txt),
+    ]
+    st.markdown('<div class="g-sim-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+    igualar = [f"{esc(f)} ({_rs(conc[f])}): {_pct_sinal(v)}" for f, v in sorted(r["igualar"].items(), key=lambda kv: kv[1], reverse=True)]
+    st.markdown(f'<p class="g-sim-nota">Variação necessária para igualar o preço de cada concorrente: {" · ".join(igualar)}.</p>',
+                unsafe_allow_html=True)
+    indisp = [f for f in conc if f in precos.index and _indisponivel(precos.loc[f, "disponibilidade"]) and pd.notna(conc[f])]
+    if indisp:
+        st.markdown(f'<p class="g-sim-nota">Indisponível hoje: {", ".join(indisp)}. O preço aparece, mas o produto não pode ser comprado agora.</p>',
+                    unsafe_allow_html=True)
+
+    # --- margem ---
+    st.markdown('<h2 class="g-section" style="font-size:var(--text-heading);margin-top:var(--spacing-24)">Quanto de margem se perde</h2>',
+                unsafe_allow_html=True)
+    if r["custo"] is None:
+        st.info("Informe o custo unitário (ou a margem atual) para calcular a margem e o lucro mensal.")
+    else:
+        m_novo_pct = fmt_valor(r["m_novo_pct"], "pct") if r["m_novo_pct"] is not None else "—"
+        cls = "perde" if r["perda_un"] > 0.005 else ("ganha" if r["perda_un"] < -0.005 else "")
+        cards = [
+            _card_sim("Margem por unidade", _rs(r["m_novo_un"]), f'hoje {_rs(r["m_atual_un"])}'),
+            _card_sim("Margem (%)", m_novo_pct, f'hoje {fmt_valor(r["m_atual_pct"], "pct")}'),
+            _card_sim("Margem perdida por unidade", _rs(max(r["perda_un"], 0)) if r["perda_un"] >= 0 else f'+{_rs(-r["perda_un"])}',
+                      f'{_pct_sinal(-(r["perda_un"] / r["m_atual_un"] * 100)) if r["m_atual_un"] > 0 else "—"} da margem de hoje', cls),
+        ]
+        if unidades > 0:
+            cards.append(_card_sim("Lucro mensal", _rs(r["lucro_novo"]),
+                                   f'hoje {_rs(r["lucro_atual"])} · {"+" if r["delta"] > 0 else ""}{_rs(r["delta"])} por mês'.replace("R$ -", "−R$ "),
+                                   "perde" if r["delta"] < -0.005 else ("ganha" if r["delta"] > 0.005 else "")))
+        st.markdown('<div class="g-sim-grid">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+        if r["m_novo_un"] <= 0:
+            st.warning("Com esse preço a Farmazids venderia abaixo do custo.")
+        elif r["equilibrio"] is not None and r["perda_un"] > 0.005 and unidades > 0:
+            st.markdown(f'<p class="g-sim-nota">Para manter o lucro mensal de hoje, as vendas precisariam crescer {fmt_valor(r["equilibrio"], "pct")}.</p>',
+                        unsafe_allow_html=True)
+    coleta = ", ".join(f"{f}: {precos.loc[f, 'coleta']}" for f in precos.index if pd.notna(precos.loc[f, "coleta"]))
+    st.markdown('<p class="g-sim-nota">Preço dos concorrentes: o menor entre o preço sem desconto e o pix, na coleta mais recente '
+                f'({esc(coleta)}). Margem = (preço − custo) ÷ preço. Os preços dos concorrentes ficam como estão.</p>',
+                unsafe_allow_html=True)
+    if st.query_params.get("debug") == "1":
+        with st.expander("Diagnóstico: SQL das consultas"):
+            for sql in (sql_busca_produto(termo), sql_precos_produto(gtin), sql_unidades_mes(gtin)):
+                st.code(sql, language="sql")
+
+
 if st.session_state.page == "inicio":
     render_boas_vindas()
     st.stop()
 
 if st.session_state.page == "insights":
     render_insights()
+    st.stop()
+
+if st.session_state.page == "simulador":
+    render_simulador()
     st.stop()
 
 
