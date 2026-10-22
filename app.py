@@ -785,8 +785,11 @@ INSIGHTS = [
         "pergunta": (
             "Quais são os 3 produtos mais vendidos em cada farmácia no mês mais recente com vendas "
             "registradas na tabela historico_farmazids? Considere o mês da maior data_venda da tabela, "
-            "e não o mês atual. Some quantidade_vendida por farmácia e produto. Devolva exatamente 3 colunas, "
-            "nesta ordem e com estes apelidos: farmacia, produto, total_vendido."
+            "e não o mês atual. Some quantidade_vendida por farmácia e gtin. Mostre o NOME do produto, nunca o gtin: "
+            "se historico_farmazids não tiver o nome, busque-o pelo gtin em medicamentos_farmazids, farmaponte_tratado "
+            "e veracruz_tratado (um único registro por gtin em cada tabela, com MAX(nome), e COALESCE entre elas) "
+            "sem duplicar as vendas; use o gtin só se nenhuma tabela tiver o nome. Devolva exatamente 3 colunas, "
+            "nesta ordem e com estes apelidos: farmacia, produto (o nome), total_vendido."
         ),
     },
     {
