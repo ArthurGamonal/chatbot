@@ -341,6 +341,13 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .st-key-nav_simulador button[kind="primary"], .st-key-nav_simulador button[data-testid="stBaseButton-primary"] {
   background: var(--color-gold); border-color: var(--color-gold); box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4); }
 .st-key-nav_simulador button[kind="primary"] p, .st-key-nav_simulador button[data-testid="stBaseButton-primary"] p { color: var(--color-pine-shadow); }
+/* Aba Tendências do topo, em dourado como as demais */
+.st-key-nav_tendencias button { background: transparent; border: 1px solid var(--color-gold-deep); box-shadow: none; border-radius: var(--radius-xl); }
+.st-key-nav_tendencias button p { color: var(--color-gold-deep); }
+.st-key-nav_tendencias button:hover { background: rgba(196,160,84,.15); border-color: var(--color-gold-deep); }
+.st-key-nav_tendencias button[kind="primary"], .st-key-nav_tendencias button[data-testid="stBaseButton-primary"] {
+  background: var(--color-gold); border-color: var(--color-gold); box-shadow: var(--shadow-subtle-3), var(--shadow-subtle-4); }
+.st-key-nav_tendencias button[kind="primary"] p, .st-key-nav_tendencias button[data-testid="stBaseButton-primary"] p { color: var(--color-pine-shadow); }
 </style>
 """,
     unsafe_allow_html=True,
@@ -533,10 +540,10 @@ if "page" not in st.session_state:
     st.session_state.page = "chat"
 
 # ---------- Topo: logo + botões de troca de página ----------
-c_logo, c_ini, c_chat, c_ins, c_sim, c_dados, c_tema = st.columns([1.25, 1.4, 1.4, 1.4, 1.4, 1.4, 0.85], vertical_alignment="center")
+c_logo, c_ini, c_chat, c_ins, c_sim, c_tend, c_dados, c_tema = st.columns([1.25, 1.3, 1.3, 1.3, 1.3, 1.4, 1.3, 0.85], vertical_alignment="center")
 c_logo.markdown(f'<div class="g-logo"><b>●</b> {BOT_NAME}</div>', unsafe_allow_html=True)
 for col, key, label in ((c_ini, "inicio", "Boas-vindas"), (c_chat, "chat", "Chatbot"),
-                        (c_ins, "insights", "Insights"), (c_sim, "simulador", "Simulador"), (c_dados, "dados", "Dados")):
+                        (c_ins, "insights", "Insights"), (c_sim, "simulador", "Simulador"), (c_tend, "tendencias", "Tendências"), (c_dados, "dados", "Dados")):
     ativo = st.session_state.page == key
     if col.button(label, key=f"nav_{key}", type="primary" if ativo else "secondary", use_container_width=True):
         st.session_state.page = key
@@ -2551,6 +2558,230 @@ if st.session_state.page == "inicio":
 if st.session_state.page == "insights":
     render_insights()
     st.stop()
+
+# ---------- Página: Tendências (Google Trends x vendas) ----------
+# O usuário escolhe um medicamento, o app busca a tendência de busca na hora (com cache de 7 dias),
+# cruza com as vendas semanais e mostra se a busca costuma ANTECEDER as vendas.
+# Não precisa de Lambda novo: o próprio Streamlit consulta o Trends e o Athena.
+
+
+def limpar_termo(nome: str) -> str:
+    """Sugere um termo de busca a partir do nome do produto (marca ou substância, sem dose nem quantidade)."""
+    # Deixa em minúsculas para padronizar
+    n = str(nome).lower()
+    # Corta o nome no primeiro número (dosagem ou quantidade), ex.: "glifage xr 500mg" vira "glifage xr "
+    n = re.split(r"\d", n)[0]
+    # Tira palavras que só descrevem a forma do remédio
+    n = re.sub(r"\b(comprimidos?|cápsulas?|capsulas?|gotas|xarope|solução|solucao|creme|gel)\b", " ", n)
+    # Remove espaços repetidos
+    return " ".join(n.split())
+
+
+def sql_vendas_semana(gtin: str) -> str:
+    """Unidades vendidas pela Farmazids por semana (segunda a domingo), na carga mais recente do histórico."""
+    carga = '"$file_modified_time" = (SELECT MAX("$file_modified_time") FROM historico_farmazids)'
+    return ("SELECT CAST(date_trunc('week', CAST(h.data_venda AS date)) AS date) AS semana, "
+            "SUM(h.quantidade_vendida) AS unidades "
+            f"FROM historico_farmazids h WHERE h.farmacia = 'farmazids' AND h.gtin = '{gtin}' AND h.{carga} "
+            "GROUP BY 1 ORDER BY 1 LIMIT 300")
+
+
+def preparar_vendas(bruto):
+    """Resultado do Athena vira uma série semanal; semanas sem venda entram como zero."""
+    if bruto is None or bruto.shape[1] < 2:
+        return None
+    d = bruto.iloc[:, :2].copy()
+    d.columns = ["semana", "unidades"]
+    d["semana"] = pd.to_datetime(d["semana"], errors="coerce")
+    d["unidades"] = pd.to_numeric(d["unidades"], errors="coerce")
+    d = d.dropna()
+    if d.empty:
+        return None
+    serie = d.set_index("semana")["unidades"]
+    # Cria todas as semanas do período e preenche com 0 as que não tiveram venda
+    todas = pd.date_range(serie.index.min(), serie.index.max(), freq="7D")
+    return serie.reindex(todas, fill_value=0.0)
+
+
+@st.cache_data(ttl=7 * 24 * 3600, show_spinner=False)
+def buscar_trends(termo: str) -> pd.Series:
+    """Índice semanal (0 a 100) de busca no Brasil nos últimos 5 anos. Guardado por 7 dias por termo.
+    Se falhar, levanta RuntimeError. Erros não entram no cache, então a próxima tentativa busca de novo."""
+    try:
+        from pytrends.request import TrendReq  # importado aqui para o app abrir mesmo sem a biblioteca
+    except ImportError as exc:
+        raise RuntimeError("A biblioteca pytrends não está instalada. Rode: py -m pip install pytrends") from exc
+
+    ultimo_erro = None
+    for tentativa in range(3):  # até 3 tentativas, esperando um pouco mais a cada falha
+        try:
+            pt = TrendReq(hl="pt-BR", tz=180, timeout=(10, 25))
+            pt.build_payload([termo], timeframe="today 5-y", geo="BR")
+            df = pt.interest_over_time()
+            if df.empty or termo not in df.columns:
+                raise ValueError("sem volume de busca suficiente para esse termo")
+            if "isPartial" in df.columns:
+                df = df[~df["isPartial"].astype(bool)]  # descarta a semana ainda incompleta
+            serie = df[termo].astype(float)
+            # O Trends marca a semana pelo DOMINGO e o Athena pela SEGUNDA: somamos 1 dia para alinhar
+            serie.index = serie.index + pd.Timedelta(days=1)
+            return serie
+        except Exception as exc:  # noqa: BLE001
+            ultimo_erro = exc
+            time.sleep(2 * (tentativa + 1))
+    raise RuntimeError(f"Não consegui obter a tendência no Google Trends ({ultimo_erro}). Tente de novo em alguns minutos.")
+
+
+def _busca_atrasada(trends: pd.Series, k: int) -> pd.Series:
+    """Desloca a busca k semanas para frente: o valor de hoje passa a 'valer' para a semana de hoje + k."""
+    t = trends.copy()
+    t.index = t.index + pd.Timedelta(weeks=k)
+    return t
+
+
+def cruzar(vendas: pd.Series, trends: pd.Series, max_lag: int = 8) -> pd.DataFrame:
+    """Correlação entre as vendas de uma semana e a busca de k semanas antes, para k de 0 a max_lag."""
+    linhas = []
+    for k in range(max_lag + 1):
+        junto = pd.concat([vendas, _busca_atrasada(trends, k)], axis=1, join="inner").dropna()
+        junto.columns = ["vendas", "busca"]
+        # Exige pelo menos 12 semanas em comum e alguma variação nas duas séries
+        if len(junto) >= 12 and junto["vendas"].std() > 0 and junto["busca"].std() > 0:
+            linhas.append({"atraso": k, "correlacao": junto["vendas"].corr(junto["busca"]), "semanas": len(junto)})
+    return pd.DataFrame(linhas)
+
+
+def projetar(vendas: pd.Series, trends: pd.Series, k: int) -> pd.Series:
+    """Reta vendas = a + b * busca(k semanas antes), aplicada às semanas depois da última venda conhecida."""
+    import numpy as np
+
+    busca_k = _busca_atrasada(trends, k)
+    junto = pd.concat([vendas, busca_k], axis=1, join="inner").dropna()
+    junto.columns = ["vendas", "busca"]
+    b, a = np.polyfit(junto["busca"], junto["vendas"], 1)  # b é a inclinação e a é o ponto de partida
+    futuro = busca_k[busca_k.index > vendas.index.max()]  # semanas ainda sem venda, mas com busca conhecida
+    return (a + b * futuro).clip(lower=0)
+
+
+def render_tendencias():
+    st.markdown(CSS_DESTAQUES + CSS_BV + SIM_CSS + (SIM_CSS_ESCURO if DARK else ""), unsafe_allow_html=True)
+    st.markdown(
+        '<span class="g-tag">Tendências</span>'
+        '<h1 class="g-title" style="font-size:clamp(36px,5vw,56px)">Busca x vendas</h1>'
+        '<p class="g-sub">Veja se as buscas no Google costumam subir antes das vendas de um medicamento, '
+        'para antecipar a demanda.</p>',
+        unsafe_allow_html=True,
+    )
+    termo_busca = st.text_input("Buscar medicamento", key="tr_busca", placeholder="Ex.: dipirona, glifage, losartana")
+    if len(_termo_busca(termo_busca).replace("%", "")) < 2:
+        st.info("Digite ao menos 2 letras do nome do medicamento para começar.")
+        return
+    try:
+        with carregando("Buscando o medicamento..."):
+            achados = rows_to_df(run_bv(sql_busca_produto(termo_busca)).get("rows") or [])
+    except RuntimeError as exc:
+        st.warning(f"Não consegui buscar o medicamento agora: {exc}")
+        return
+    if achados is None or achados.empty:
+        st.info("Nenhum medicamento do catálogo da Farmazids encontrado com esse nome.")
+        return
+    nomes = dict(zip(achados["gtin"], achados["nome"]))
+    gtin = st.selectbox("Produto", list(nomes), format_func=lambda g: nomes[g], key=f"tr_prod_{_termo_busca(termo_busca)}")
+    if not re.fullmatch(r"\d{6,14}", str(gtin)):
+        st.warning("Este produto não tem um GTIN válido.")
+        return
+    # O termo é sugerido pelo nome, mas a pessoa pode trocar (ex.: de "glifage" para "metformina")
+    termo = st.text_input("Termo pesquisado no Google", value=limpar_termo(nomes[gtin]), key=f"tr_termo_{gtin}",
+                          help="Troque pela marca ou substância que as pessoas realmente digitam.").strip()
+    if len(termo) < 2:
+        return
+
+    # --- vendas semanais (Athena) ---
+    try:
+        with carregando("Consultando as vendas..."):
+            vendas = preparar_vendas(rows_to_df(run_bv(sql_vendas_semana(gtin)).get("rows") or []))
+    except RuntimeError as exc:
+        st.warning(f"Não consegui consultar as vendas agora: {exc}")
+        return
+    if vendas is None or len(vendas) < 12:
+        st.info("Há poucas semanas de venda deste produto para cruzar com as buscas (mínimo de 12 semanas).")
+        return
+
+    # --- tendência de busca (Google Trends, com cache de 7 dias) ---
+    try:
+        with carregando("Buscando no Google Trends..."):
+            trends = buscar_trends(termo)
+    except RuntimeError as exc:
+        st.warning(str(exc))
+        return
+
+    # --- cruzamento: em qual atraso a busca melhor acompanha as vendas ---
+    cruz = cruzar(vendas, trends)
+    if cruz.empty:
+        st.info("Não há semanas em comum suficientes entre as vendas e as buscas para cruzar.")
+        return
+    melhor = cruz.loc[cruz["correlacao"].idxmax()]
+    k, corr, semanas = int(melhor["atraso"]), float(melhor["correlacao"]), int(melhor["semanas"])
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Atraso com maior correlação", f"{k} semanas" if k else "sem atraso")
+    c2.metric("Correlação", f"{corr:.2f}".replace(".", ","))
+    c3.metric("Semanas comparadas", semanas)
+    if corr < 0.4:
+        st.info("A busca no Google não acompanha as vendas deste produto de forma clara. Tente outro termo.")
+    elif k >= 1:
+        st.success(f"A busca costuma subir cerca de {k} semanas antes das vendas. Isso permite antecipar a demanda.")
+    else:
+        st.info("A busca e as vendas andam juntas, sem antecedência. Ajuda a entender, mas não a antecipar.")
+    if semanas < 26:
+        st.warning(f"Só há {semanas} semanas de histórico em comum. Com tão pouco tempo, a correlação pode ser coincidência.")
+
+    # --- projeção das próximas semanas (só quando há relação razoável) ---
+    prev = projetar(vendas, trends, k) if corr >= 0.4 else None
+
+    # --- gráfico: as duas séries na mesma escala de 0 a 100 ---
+    pico = float(vendas.max()) or 1.0
+    partes = [
+        pd.DataFrame({"data": vendas.index, "indice": (vendas / pico * 100).values, "serie": "Vendas", "tipo": "observado"}),
+        pd.DataFrame({"data": trends.index, "indice": trends.values, "serie": "Busca no Google", "tipo": "observado"}),
+    ]
+    if prev is not None and not prev.empty:
+        partes.append(pd.DataFrame({"data": prev.index, "indice": (prev / pico * 100).values,
+                                    "serie": "Vendas", "tipo": "previsto"}))
+    dados = pd.concat(partes)
+    dados = dados[dados["data"] >= vendas.index.min() - pd.Timedelta(weeks=4)]  # foca no período com vendas
+    graf = alt.Chart(dados).mark_line(strokeWidth=2.5).encode(
+        x=alt.X("data:T", title=None, axis=alt.Axis(format="%m/%Y", labelAngle=0)),
+        y=alt.Y("indice:Q", title="Índice (0 a 100)"),
+        color=alt.Color("serie:N", title=None, scale=alt.Scale(domain=["Vendas", "Busca no Google"], range=[PURPLE, GOLD]),
+                        legend=alt.Legend(orient="bottom")),
+        strokeDash=alt.StrokeDash("tipo:N", legend=None,
+                                  scale=alt.Scale(domain=["observado", "previsto"], range=[[1, 0], [5, 4]])),
+        tooltip=[alt.Tooltip("data:T", title="Semana", format="%d/%m/%Y"), alt.Tooltip("serie:N", title="Série"),
+                 alt.Tooltip("tipo:N", title="Tipo"), alt.Tooltip("indice:Q", title="Índice", format=".0f")],
+    ).properties(height=340)
+    if DARK:
+        graf = graf.configure_axis(labelColor=MUTED, titleColor=MUTED, gridColor=GRID).configure_legend(
+            labelColor=INK).properties(background="rgba(0,0,0,0)")
+    with st.container(border=True):
+        st.markdown('<div class="g-label">Vendas e buscas, cada uma na própria escala (0 a 100)</div>', unsafe_allow_html=True)
+        st.altair_chart(graf, use_container_width=True, theme=None if DARK else "streamlit")
+
+    if prev is not None and not prev.empty:
+        st.markdown('<div class="g-label">Projeção de vendas (unidades por semana)</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame({"Semana": prev.index.strftime("%d/%m/%Y"), "Unidades previstas": prev.round(0).astype(int).values}),
+                     use_container_width=True, hide_index=True)
+    st.caption("A projeção é uma indicação baseada em uma reta simples entre busca e vendas, não uma previsão firme. "
+               "A tendência fica guardada por 7 dias por termo.")
+    if st.button("Atualizar tendência deste termo", key=f"tr_refresh_{gtin}"):
+        buscar_trends.clear()
+        st.rerun()
+
+
+if st.session_state.page == "tendencias":
+    render_tendencias()
+    st.stop()
+
 
 if st.session_state.page == "simulador":
     render_simulador()
