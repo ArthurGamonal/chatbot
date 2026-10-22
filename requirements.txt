@@ -5,3 +5,4 @@ altair
 reportlab
 matplotlib
 amazon-transcribe
+pytrends
