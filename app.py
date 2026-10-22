@@ -1,5 +1,7 @@
+import asyncio
 import base64
 import contextlib
+import hashlib
 import hmac
 import io
 import json
@@ -8,6 +10,8 @@ import re
 import time
 import unicodedata
 import uuid
+import wave
+from array import array
 from datetime import datetime
 from html import escape as esc
 from pathlib import Path
@@ -18,6 +22,13 @@ import pandas as pd
 import streamlit as st
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+
+try:  # pip install amazon-transcribe  (só necessário para perguntar por voz)
+    from amazon_transcribe.client import TranscribeStreamingClient
+    from amazon_transcribe.handlers import TranscriptResultStreamHandler
+except ImportError:
+    TranscribeStreamingClient = None
+    TranscriptResultStreamHandler = object
 
 # ---------- AWS Step Functions ----------
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
@@ -62,6 +73,8 @@ ZIDS_GIF = "app/static/ZIDS_dark.gif" if DARK else "app/static/ZIDS.gif"
 ZIDS_INSIGHTS_GIF = "app/static/ZIDS_INSIGHTS_dark.gif" if DARK else "app/static/ZIDS_INSIGHTS.gif"
 # GIF exibido na tela de login quando usuário ou senha estão incorretos (arquivo na pasta static)
 SENHA_ERRADA_GIF = "app/static/SENHA_ERRADA.gif"
+# Segundo GIF da senha errada: aparece ao lado do primeiro (arquivo na pasta static)
+SENHA_ERRADA_GIF_2 = "app/static/SENHA_ERRADA_2.gif"
 
 # ---------- Estilo (tokens do Grove AI) ----------
 st.markdown(
@@ -444,8 +457,8 @@ def tela_login():
 .g-login .g-logo-img { margin: 0 auto var(--spacing-24); }
 .g-login .g-tag { margin-bottom: var(--spacing-16); }
 .g-login .g-cap { margin-bottom: var(--spacing-24); }
-.g-erro-gif { text-align: center; margin-top: var(--spacing-16); }
-.g-erro-gif img { width: 100%; max-width: 360px; border-radius: var(--radius-cards); }
+.g-erro-gif { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: var(--spacing-16); margin-top: var(--spacing-16); }
+.g-erro-gif img { height: 240px; width: auto; max-width: 100%; object-fit: contain; border-radius: var(--radius-cards); }
 [data-testid="stForm"] {
   border: 1px solid rgba(128,128,128,.25); border-radius: var(--radius-cards);
   padding: var(--card-padding); background: var(--color-pure-white);
@@ -489,7 +502,8 @@ def tela_login():
             time.sleep(1)  # atrasa tentativas erradas
             st.error("Usuário ou senha incorretos.")
             st.markdown(
-                f'<div class="g-erro-gif"><img src="{SENHA_ERRADA_GIF}" alt="Senha incorreta"></div>',
+                f'<div class="g-erro-gif"><img src="{SENHA_ERRADA_GIF}" alt="Senha incorreta">'
+                f'<img src="{SENHA_ERRADA_GIF_2}" alt="Senha incorreta"></div>',
                 unsafe_allow_html=True,
             )
 
@@ -2578,6 +2592,109 @@ else:
         st.session_state.sidebar_aberta = True
         st.rerun()
 
+# ---------- Perguntar por voz: gravação no navegador + Amazon Transcribe Streaming ----------
+# O áudio é transcrito AQUI, no app; a state machine continua recebendo só texto ({"pergunta", "historico"}).
+# O texto transcrito aparece numa caixa editável e só vai ao chatbot quando a pessoa clica em "Enviar pergunta".
+TRANSCRIBE_REGION = os.environ.get("TRANSCRIBE_REGION", AWS_REGION)
+VOZ_CSS_ESCURO = """
+<style>
+[data-testid="stTextArea"] [data-baseweb="textarea"], [data-testid="stTextArea"] [data-baseweb="base-input"] {
+  background-color: #2a2236 !important; border: 1px solid rgba(255,255,255,.14) !important; }
+[data-testid="stTextArea"] textarea { background-color: transparent !important; color: #e6e1f0 !important; -webkit-text-fill-color: #e6e1f0 !important; }
+</style>
+"""
+
+
+class _ColetorTranscricao(TranscriptResultStreamHandler):
+    """Junta os trechos finais (não parciais) devolvidos pelo Transcribe."""
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self.partes: list = []
+
+    async def handle_transcript_event(self, event):
+        for resultado in event.transcript.results:
+            if not resultado.is_partial and resultado.alternatives:
+                self.partes.append(resultado.alternatives[0].transcript)
+
+
+def _wav_para_pcm(wav: bytes) -> tuple:
+    """WAV do st.audio_input → (PCM 16 bits mono, taxa em Hz)."""
+    with wave.open(io.BytesIO(wav), "rb") as w:
+        canais, largura, taxa = w.getnchannels(), w.getsampwidth(), w.getframerate()
+        pcm = w.readframes(w.getnframes())
+    if largura != 2:
+        raise ValueError("formato de áudio não suportado (esperado PCM de 16 bits)")
+    if canais > 1:  # fica só com o primeiro canal
+        amostras = array("h")
+        amostras.frombytes(pcm)
+        pcm = amostras[::canais].tobytes()
+    return pcm, taxa
+
+
+async def _transcrever_async(pcm: bytes, taxa: int) -> str:
+    cliente = TranscribeStreamingClient(region=TRANSCRIBE_REGION)
+    stream = await cliente.start_stream_transcription(language_code="pt-BR", media_sample_rate_hz=taxa, media_encoding="pcm")
+    coletor = _ColetorTranscricao(stream.output_stream)
+
+    async def enviar():
+        passo = int(taxa * 2 * 0.2)  # blocos de 200 ms
+        for i in range(0, len(pcm), passo):
+            await stream.input_stream.send_audio_event(audio_chunk=pcm[i:i + passo])
+        await stream.input_stream.end_stream()
+
+    await asyncio.gather(enviar(), coletor.handle_events())
+    return " ".join(coletor.partes).strip()
+
+
+def transcrever_audio(wav: bytes) -> str:
+    """Transcreve (pt-BR) o áudio gravado. Levanta exceção com mensagem legível se não for possível."""
+    if TranscribeStreamingClient is None:
+        raise RuntimeError("falta instalar a biblioteca amazon-transcribe")
+    pcm, taxa = _wav_para_pcm(wav)
+    return asyncio.run(_transcrever_async(pcm, taxa))
+
+
+def render_voz():
+    """Gravador + texto transcrito para conferir. Devolve a pergunta quando a pessoa clica em Enviar."""
+    if not hasattr(st, "audio_input"):  # versões antigas do Streamlit
+        return None
+    if DARK:
+        st.markdown(VOZ_CSS_ESCURO, unsafe_allow_html=True)
+    n = st.session_state.get("voz_n", 0)
+    with st.expander("Perguntar por voz"):
+        audio = st.audio_input("Grave a pergunta; ao parar, ela é transcrita", key=f"voz_audio_{n}", sample_rate=16000)
+        if audio is None:
+            return None
+        dados = audio.getvalue()
+        h = hashlib.sha1(dados).hexdigest()
+        if st.session_state.get("voz_hash") != h:  # áudio novo: transcreve uma única vez
+            st.session_state.voz_hash = h
+            try:
+                with carregando("Transcrevendo o áudio..."):
+                    texto = transcrever_audio(dados)
+                erro = "" if texto else "Não entendi o áudio. Grave de novo, mais perto do microfone."
+            except Exception as exc:  # noqa: BLE001 - qualquer falha vira um aviso, nunca derruba o chat
+                texto, erro = "", f"Não consegui transcrever o áudio: {exc}"
+            st.session_state.voz_erro = erro
+            st.session_state[f"voz_texto_{n}"] = texto
+        if st.session_state.get("voz_erro"):
+            st.warning(st.session_state.voz_erro)
+            return None
+        texto = st.text_area("Confira a pergunta antes de enviar (você pode corrigir o texto)", key=f"voz_texto_{n}", height=90)
+        c1, c2, _ = st.columns([1.3, 1, 3])
+        enviar = c1.button("Enviar pergunta", key=f"voz_env_{n}", type="primary", disabled=not texto.strip(), use_container_width=True)
+        descartar = c2.button("Descartar", key=f"voz_desc_{n}", use_container_width=True)
+    if enviar or descartar:
+        st.session_state.voz_n = n + 1  # troca a chave: o gravador volta vazio
+        st.session_state.pop("voz_hash", None)
+        st.session_state.pop("voz_erro", None)
+        if descartar:
+            st.rerun()
+        return texto.strip()
+    return None
+
+
 chat = st.session_state.chats[st.session_state.chat_ativo]
 mensagens = chat["messages"]
 
@@ -2591,7 +2708,12 @@ for m in mensagens:
     with st.chat_message(m["role"]):
         render_message(m)
 
-prompt = st.chat_input("Escreva sua pergunta") or clicked
+voz_box = st.empty()
+with voz_box.container():
+    voz = render_voz()
+prompt = st.chat_input("Escreva sua pergunta") or clicked or voz
+if voz:
+    voz_box.empty()  # esconde o gravador enquanto a pergunta é processada
 if prompt:
     historico = montar_historico(mensagens)  # só as últimas trocas DESTE chat
     mensagens.append({"role": "user", "content": prompt})
