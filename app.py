@@ -665,15 +665,60 @@ def tema_escuro(chart):
         .configure_legend(labelColor=INK, titleColor=INK)
         .properties(background="rgba(0,0,0,0)")
     )
-CHART_WORDS = ("gráfico", "grafico", "chart", "plot", "plote", "visualização", "visualizacao")
+
+# ---------- Quando e como desenhar o gráfico ----------
+
+# Cor fixa de cada farmácia: assim a pessoa aprende "roxo = Farmazids" e vale para todo gráfico.
+COR_FARMACIA = {"farmazids": PURPLE, "farmaponte": GOLD, "veracruz": "#9c98a8"}
+
+# Trechos que indicam que a pessoa quer um gráfico. A comparação é feita sem acento
+# e em minúsculas, então "Gráfico", "grafico" e "GRÁFICO" funcionam todos.
+# Usamos "em barra" (e não só "barra") para não confundir com "código de barras".
+PALAVRAS_GRAFICO = (
+    "grafico", "chart", "plot", "visualizacao",       # pedido direto
+    "em barra", "em linha", "em pizza", "em rosca",   # troca de tipo: "gere em barras"
+    "ao longo", "evolucao", "mes a mes",              # perguntas de evolução no tempo
+)
+
+
+def _sem_acento(texto: str) -> str:
+    """Põe em minúsculas e tira os acentos, para comparar textos sem depender da grafia."""
+    # NFD separa a letra do acento (á vira a + ´); depois descartamos só os acentos (categoria "Mn")
+    t = unicodedata.normalize("NFD", str(texto).lower())
+    return "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
 
 
 def pediu_grafico(pergunta: str) -> bool:
-    return any(w in pergunta.lower() for w in CHART_WORDS)
+    """True se a pergunta pede um gráfico (ou a troca do tipo dele)."""
+    q = _sem_acento(pergunta)
+    # any(...) é True se QUALQUER trecho da lista aparecer na pergunta
+    return any(p in q for p in PALAVRAS_GRAFICO)
 
 
 def wants_chart(pergunta: str) -> bool:
     return pediu_grafico(pergunta)
+
+
+def tipo_pedido(pergunta: str):
+    """Tipo citado na pergunta ('pizza', 'barras', 'linha') ou None, e aí o app escolhe sozinho."""
+    q = _sem_acento(pergunta)
+    if "pizza" in q or "rosca" in q:
+        return "pizza"
+    if "em barra" in q or "grafico de barra" in q:
+        return "barras"
+    if "em linha" in q or "grafico de linha" in q:
+        return "linha"
+    return None
+
+
+def _formato_data(vals: pd.Series):
+    """Descobre se a coluna é data em AAAA-MM-DD (dia/semana) ou AAAA-MM (mês). Devolve o formato ou None."""
+    for fmt in ("%Y-%m-%d", "%Y-%m"):
+        # errors="coerce" troca o que não é data por NaT (vazio) em vez de dar erro
+        if pd.to_datetime(vals, format=fmt, errors="coerce").notna().all():
+            return fmt
+    return None
+
 
 
 def destaca_barato(pergunta: str) -> bool:
@@ -691,41 +736,83 @@ def _tipo_marca(chart):
 
 
 def build_chart(df: pd.DataFrame, pergunta: str):
-    """Monta um gráfico Altair a partir do resultado; devolve None se não houver dados numéricos."""
+    """Monta o gráfico Altair a partir do resultado; devolve None se não houver dados numéricos."""
     q = pergunta.lower()
+    pedido = tipo_pedido(pergunta)
     df = df.copy()
-    date_col, num_cols, text_cols = None, [], []
+
+    # 1) Classifica cada coluna do resultado como data, número ou texto
+    col_data, fmt, col_num, col_txt = None, None, [], []
     for c in df.columns:
         vals = df[c].dropna().astype(str)
         if vals.empty:
-            text_cols.append(c)
+            col_txt.append(c)
             continue
-        dates = pd.to_datetime(vals, format="%Y-%m-%d", errors="coerce")
+        formato = _formato_data(vals)
         nums = pd.to_numeric(vals, errors="coerce")
+        # gtin e códigos parecem números, mas não servem como eixo y
         looks_like_id = vals.str.fullmatch(r"\d{8,}").all() or any(k in c.lower() for k in ("gtin", "codigo", "id_"))
-        if date_col is None and dates.notna().all():
-            date_col = c
+        if col_data is None and formato:
+            col_data, fmt = c, formato
         elif nums.notna().all() and not looks_like_id:
-            num_cols.append(c)
+            col_num.append(c)
         else:
-            text_cols.append(c)
-    if not num_cols:
-        return None
+            col_txt.append(c)
+    if not col_num:
+        return None  # sem número não há o que desenhar
 
-    y = num_cols[-1]  # agregados costumam ser a última coluna do SELECT
-    d = pd.DataFrame({"valor": pd.to_numeric(df[y], errors="coerce")})
-    d["rotulo"] = df[text_cols].astype(str).agg(" – ".join, axis=1) if text_cols else df.index.astype(str)
+    # 2) A última coluna numérica é o valor (o SELECT deve trazer o valor por último)
+    y = col_num[-1]
+    valor = pd.to_numeric(df[y], errors="coerce")
+    # Colunas de texto viram o rótulo (ex.: a farmácia). Se houver mais de uma, junta com " – "
+    rotulo = df[col_txt].astype(str).agg(" – ".join, axis=1) if col_txt else None
+
+    # 3) Há data: série no tempo (linhas ou barras agrupadas)
+    if col_data is not None:
+        d = pd.DataFrame({
+            "x": pd.to_datetime(df[col_data], format=fmt, errors="coerce"),
+            "valor": valor,
+            "serie": rotulo if rotulo is not None else "Total",
+        }).dropna(subset=["x", "valor"])
+        if d.empty:
+            return None
+
+        # Rótulo do eixo em português: mês mostra mm/aaaa, semana ou dia mostra dd/mm
+        fmt_rot = "%m/%Y" if fmt == "%Y-%m" else "%d/%m"
+        d["periodo"] = d["x"].dt.strftime(fmt_rot)
+        ordem = list(d.sort_values("x")["periodo"].drop_duplicates())  # ordem cronológica
+
+        # Uma cor por série (farmácia); com uma série só, a legenda não é necessária
+        series = list(dict.fromkeys(d["serie"]))
+        escala = alt.Scale(
+            domain=series,
+            range=[COR_FARMACIA.get(s.lower(), PALETTE[i % len(PALETTE)]) for i, s in enumerate(series)],
+        )
+        cor = alt.Color("serie:N", title=None, scale=escala,
+                        legend=alt.Legend(orient="bottom") if len(series) > 1 else None)
+        dica = [alt.Tooltip("periodo:N", title="Período"), alt.Tooltip("serie:N", title="Série"),
+                alt.Tooltip("valor:Q", title=y)]
+
+        # Tipo: o que a pessoa pediu; senão, linha para muitos pontos e barras para poucos
+        tipo = pedido if pedido in ("barras", "linha") else ("linha" if d["x"].nunique() > 12 else "barras")
+        if tipo == "linha":
+            return alt.Chart(d).mark_line(point=True, strokeWidth=2.5).encode(
+                x=alt.X("x:T", title=None, axis=alt.Axis(format=fmt_rot, labelAngle=0)),
+                y=alt.Y("valor:Q", title=y), color=cor, tooltip=dica,
+            )
+        barras = alt.Chart(d).mark_bar(cornerRadiusEnd=4).encode(
+            x=alt.X("periodo:O", sort=ordem, title=None, axis=alt.Axis(labelAngle=-30)),
+            y=alt.Y("valor:Q", title=y), color=cor, tooltip=dica,
+        )
+        if len(series) > 1:
+            barras = barras.encode(xOffset=alt.XOffset("serie:N"))  # barras lado a lado por farmácia
+        return barras
+
+    # 4) Sem data: comparação entre itens (barras) ou pizza
+    d = pd.DataFrame({"valor": valor})
+    d["rotulo"] = rotulo if rotulo is not None else df.index.astype(str)
     ytitle = alt.Axis(title=y)
-
-    if date_col is not None:
-        d["x"] = pd.to_datetime(df[date_col], format="%Y-%m-%d", errors="coerce")
-        enc = dict(x=alt.X("x:T", title=None), y=alt.Y("valor:Q", axis=ytitle))
-        if text_cols:
-            enc["color"] = alt.Color("rotulo:N", title=None, scale=alt.Scale(range=PALETTE))
-            return alt.Chart(d).mark_line(point=True).encode(**enc)
-        return alt.Chart(d).mark_line(point=True, color=PURPLE).encode(**enc)
-
-    if "pizza" in q and len(d) <= 8:
+    if pedido == "pizza" and len(d) <= 8:
         return alt.Chart(d).mark_arc().encode(
             theta="valor:Q", color=alt.Color("rotulo:N", title=None, scale=alt.Scale(range=PALETTE))
         )
@@ -738,7 +825,7 @@ def build_chart(df: pd.DataFrame, pergunta: str):
             tooltip=["rotulo", "valor"],
         )
     )
-    if destaca_barato(q):  # em gráfico pedido pelo usuário, o menor valor (mais barato) fica em dourado
+    if destaca_barato(q):  # o menor valor (mais barato) fica em dourado
         barras = barras.encode(color=alt.condition(
             alt.datum.valor == float(d["valor"].min()), alt.value(GOLD), alt.value(PURPLE)))
     return barras
@@ -835,19 +922,24 @@ INSIGHTS = [
     },
     {
         "titulo": "Sugestões para o catálogo",
+        "descricao": "Produtos que não estão na Farmazids, escolhidos pelo maior faturamento (preço × quantidade vendida).",
         "tipo": "tabela",
         "pergunta": (
-            "Quero sugestões de produtos para adicionar ao catálogo da Farmazids. Pegue, na coleta mais recente "
-            "de farmaponte_tratado e de veracruz_tratado, os produtos cujo gtin NÃO existe na tabela "
-            "medicamentos_farmazids (use NOT EXISTS ou LEFT JOIN com IS NULL), com gtin e preco_desconto_pix "
-            "não nulos e maiores que zero. As tabelas dos concorrentes não têm vendas, então priorize nesta "
-            "ordem: 1) produtos cujo gtin aparece nas duas tabelas (FarmaPonte e VeraCruz); 2) produtos das "
-            "categorias que mais vendem na Farmazids (some quantidade_vendida de historico_farmazids por "
-            "categoria, descobrindo a categoria de cada gtin vendido em farmaponte_tratado ou veracruz_tratado, "
-            "com um único registro por gtin para não duplicar vendas); 3) maior desconto_pct. Devolva 5 "
-            "produtos da FarmaPonte e 5 da VeraCruz (10 linhas no total), um registro por gtin em cada "
-            "concorrente. Devolva exatamente 4 colunas, nesta ordem e com estes apelidos: concorrente "
-            "(use exatamente 'FarmaPonte' ou 'VeraCruz'), produto, categoria, preco_pix (o preco_desconto_pix)."
+            "Quero sugestões de produtos para adicionar ao catálogo da Farmazids, ordenadas por FATURAMENTO. "
+            "Pegue, na coleta mais recente (maior dia de data_extracao) de farmaponte_tratado e de veracruz_tratado, "
+            "os produtos cujo gtin NÃO existe na tabela medicamentos_farmazids (use NOT EXISTS ou LEFT JOIN com IS NULL), "
+            "com gtin e preco_desconto_pix não nulos e maiores que zero, um registro por gtin (o MENOR "
+            "preco_desconto_pix do gtin). Faturamento = preco_desconto_pix × unidades vendidas, onde unidades vendidas "
+            "é a soma de quantidade_vendida na tabela historico_farmazids para o mesmo gtin e a farmácia "
+            "correspondente (farmacia = 'farmaponte' para a FarmaPonte e farmacia = 'veracruz' para a VeraCruz), no "
+            "mês da maior data_venda da carga mais recente (\"$file_modified_time\" = MAX(\"$file_modified_time\") da "
+            "tabela), e não o mês atual. Considere só produtos com unidades vendidas maiores que zero. Devolva os 5 "
+            "de maior faturamento da FarmaPonte e os 5 de maior faturamento da VeraCruz (10 linhas no total), em "
+            "ordem decrescente de faturamento dentro de cada concorrente; se algum concorrente tiver menos de 5 "
+            "produtos com vendas, complete com os de maior desconto_pct. Para a categoria, use a do próprio "
+            "concorrente, com um único registro por gtin. Devolva exatamente 4 colunas, nesta ordem e com estes "
+            "apelidos: concorrente (use exatamente 'FarmaPonte' ou 'VeraCruz'), produto, categoria, preco_pix "
+            "(o preco_desconto_pix)."
         ),
     },
     {
@@ -1855,6 +1947,159 @@ def card_mudanca(r) -> str:
     )
 
 
+def gerar_pdf_boas_vindas(saud: str, nome: str, resumo, mudancas) -> bytes:
+    """PDF (A4 paisagem) com o que está na aba de boas-vindas: resumo por farmácia + maiores mudanças de preço.
+    Sempre em tema claro. Precisa de: py -m pip install reportlab"""
+    from xml.sax.saxutils import escape
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    roxo, tinta, mudo = colors.HexColor("#6d3fc0"), colors.HexColor("#1c1c1e"), colors.HexColor("#676768")
+    grade, fundo = colors.HexColor("#e6e3ee"), colors.HexColor("#f3f1f8")
+    ouro, verde, verm = colors.HexColor("#c4a054"), colors.HexColor("#1f9d63"), colors.HexColor("#d64545")
+    try:
+        from zoneinfo import ZoneInfo
+        agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    except Exception:
+        agora = datetime.now()
+    quando = agora.strftime("%d/%m/%Y às %H:%M")
+
+    def estilo(nome_, **kw):
+        base = dict(fontName="Helvetica", fontSize=10, leading=13, textColor=tinta)
+        base.update(kw)
+        return ParagraphStyle(nome_, **base)
+
+    titulo = estilo("titulo", fontName="Helvetica-Bold", fontSize=28, leading=33)
+    h2 = estilo("h2", fontName="Helvetica-Bold", fontSize=15, leading=19)
+    rotulo = estilo("rot", fontSize=8.5, leading=11, textColor=roxo)
+    corpo = estilo("corpo", fontSize=10.5, leading=15)
+    mini = estilo("mini", fontSize=8, leading=10.5, textColor=mudo)
+    mini_c = estilo("mini_c", parent=mini, alignment=1)
+    cab = estilo("cab", fontName="Helvetica-Bold", fontSize=8.5, leading=11, textColor=roxo)
+    cel = estilo("cel", fontSize=9, leading=12)
+
+    def P(t, st_=corpo):
+        return Paragraph(escape(_pdf_texto(t)).replace("\n", "<br/>"), st_)
+
+    def cor_var(p):
+        return mudo if pd.isna(p) or abs(p) <= 0.05 else (verm if p > 0 else verde)
+
+    def txt_var(p):  # sem setas: a fonte padrão do PDF não tem ↑/↓
+        if pd.isna(p):
+            return "sem dados"
+        if abs(p) <= 0.05:
+            return "estável (0%)"
+        return f"{'subiu' if p > 0 else 'caiu'} {fmt_valor(abs(p), 'pct')}"
+
+    def var_par(p, tam, negrito=True):
+        cor = cor_var(p).hexval().replace("0x", "#")
+        fonte = "Helvetica-Bold" if negrito else "Helvetica"
+        return Paragraph(f'<font name="{fonte}" size="{tam}" color="{cor}">{escape(_pdf_texto(txt_var(p)))}</font>',
+                         estilo(f"v{tam}", fontSize=tam, leading=tam + 4))
+
+    def data_completa(v):
+        t = str(v or "").strip()[:10]
+        m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", t)
+        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}" if m else (t or "-")
+
+    def moldura(canvas, doc):
+        w, h = landscape(A4)
+        canvas.saveState()
+        canvas.setFillColor(roxo)
+        canvas.rect(0, h - 0.3 * cm, w, 0.3 * cm, stroke=0, fill=1)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(mudo)
+        canvas.drawString(1.5 * cm, 0.9 * cm, _pdf_texto(f"{BOT_NAME} · Farmazids · gerado em {quando}"))
+        canvas.drawRightString(w - 1.5 * cm, 0.9 * cm, f"Página {doc.page}")
+        canvas.restoreState()
+
+    historia = []
+    caminho = Path(__file__).parent / "logo_farmazids.png"
+    if caminho.exists():
+        png = caminho.read_bytes()
+        iw, ih = ImageReader(io.BytesIO(png)).getSize()
+        k = min(8 * cm / iw, 2.2 * cm / ih)
+        logo = Image(io.BytesIO(png), width=iw * k, height=ih * k)
+        logo.hAlign = "LEFT"
+        historia += [logo, Spacer(1, 0.5 * cm)]
+    ola = f"{saud}, {nome}" if nome else f"{saud}!"
+    historia += [Paragraph("BOAS-VINDAS", rotulo), P(ola, titulo), Spacer(1, 0.1 * cm),
+                 P("O que mudou nos preços entre as duas últimas extrações de cada farmácia.", corpo),
+                 Spacer(1, 0.6 * cm)]
+
+    # ----- resumo por farmácia: três cartões lado a lado -----
+    if resumo is not None and not resumo.empty:
+        historia += [P("O que mudou", h2), Spacer(1, 0.25 * cm)]
+        cartoes = []
+        for _, r in resumo.iterrows():
+            total, alt = r["produtos"], r["alterados"]
+            pct = (alt / total * 100) if total and pd.notna(alt) else 0.0
+            nossa = r["farmacia"] == "Farmazids"
+            numeros = Table(
+                [[P(_num(alt), estilo("n1", fontName="Helvetica-Bold", fontSize=13, leading=16, alignment=1)),
+                  P(_num(r["novos"]), estilo("n2", fontName="Helvetica-Bold", fontSize=13, leading=16, alignment=1)),
+                  P(_num(r["removidos"]), estilo("n3", fontName="Helvetica-Bold", fontSize=13, leading=16, alignment=1))],
+                 [P("Alterados", mini_c), P("Novos", mini_c), P("Removidos", mini_c)]],
+                colWidths=[2.5 * cm] * 3)
+            numeros.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
+            cartoes.append([
+                P(r["farmacia"], estilo("nf", fontName="Helvetica-Bold", fontSize=13, leading=16,
+                                        textColor=roxo if nossa else tinta)),
+                P(f"Extração de {data_completa(r['coleta_anterior'])} para {data_completa(r['coleta_atual'])}", mini),
+                Spacer(1, 0.25 * cm), var_par(r["variacao_media_pct"], 15),
+                P("variação média dos preços que mudaram", mini), Spacer(1, 0.25 * cm), numeros, Spacer(1, 0.2 * cm),
+                P(f"{fmt_valor(pct, 'pct')} do catálogo mudou de preço · {_num(total)} produtos", mini),
+            ])
+        n = len(cartoes)
+        larg = (26.7 * cm - (n - 1) * 0.4 * cm) / n
+        linha, cols = [], []
+        for i, c in enumerate(cartoes):
+            linha.append(c)
+            cols.append(larg)
+            if i < n - 1:
+                linha.append("")
+                cols.append(0.4 * cm)
+        t = Table([linha], colWidths=cols)
+        estilos = [("VALIGN", (0, 0), (-1, -1), "TOP")]
+        for i, (_, r) in enumerate(resumo.iterrows()):
+            col = i * 2
+            estilos += [("BACKGROUND", (col, 0), (col, 0), fundo), ("LINEABOVE", (col, 0), (col, 0), 2.5,
+                                                                    roxo if r["farmacia"] == "Farmazids" else ouro),
+                        ("LEFTPADDING", (col, 0), (col, 0), 10), ("RIGHTPADDING", (col, 0), (col, 0), 10),
+                        ("TOPPADDING", (col, 0), (col, 0), 8), ("BOTTOMPADDING", (col, 0), (col, 0), 8)]
+        t.setStyle(TableStyle(estilos))
+        historia += [t, Spacer(1, 0.6 * cm)]
+
+    # ----- maiores mudanças de preço -----
+    if mudancas is not None and not mudancas.empty:
+        linhas = [[Paragraph(c, cab) for c in ("FARMÁCIA", "PRODUTO", "ANTES", "AGORA", "VARIAÇÃO")]]
+        for _, r in mudancas.iterrows():
+            linhas.append([P(r["farmacia"], cel), P(r["produto"], cel), P(fmt_valor(r["preco_anterior"], "dinheiro"), cel),
+                           P(fmt_valor(r["preco_atual"], "dinheiro"), cel), var_par(r["variacao_pct"], 9)])
+        tab = Table(linhas, colWidths=[3.2 * cm, 13 * cm, 3 * cm, 3 * cm, 4.5 * cm], repeatRows=1)
+        tab.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.4, grade), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                                 ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4)]))
+        historia.append(KeepTogether([
+            P("Maiores mudanças de preço", h2), Spacer(1, 0.15 * cm),
+            P(f"Os produtos que mais variaram de uma extração para a outra (variação de {BV_LIMITE_PCT}% ou mais).", mini),
+            Spacer(1, 0.2 * cm), tab]))
+    historia += [Spacer(1, 0.5 * cm),
+                 P("O preço considerado é o menor entre o preço sem desconto e o pix, em média no dia, e a comparação é "
+                   "entre a extração mais recente e a imediatamente anterior de cada farmácia.", mini)]
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            topMargin=1.2 * cm, bottomMargin=1.6 * cm, title=f"Boas-vindas · {BOT_NAME}")
+    doc.build(historia, onFirstPage=moldura, onLaterPages=moldura)
+    return buf.getvalue()
+
+
 def render_boas_vindas():
     """Primeira tela após o login: saudação + o que mudou entre as duas últimas extrações de preços."""
     st.markdown(CSS_DESTAQUES + CSS_BV, unsafe_allow_html=True)
@@ -1865,7 +2110,11 @@ def render_boas_vindas():
         f'<div class="g-bv-hero"><div class="g-brand">{load_logo()}<span class="g-tag">Boas-vindas</span></div>'
         f'<h1 class="g-title" style="font-size:clamp(40px,6vw,64px)">{ola}</h1>'
         f'<p class="g-sub">Veja o que mudou nos preços entre as duas últimas extrações de cada farmácia.</p>'
-        f'<div class="g-cta"><a class="g-btn fill" href="#novidades">Ver o que mudou</a></div></div>'
+        f'<div class="g-cta"><a class="g-btn fill" href="#novidades">Ver o que mudou</a></div></div>',
+        unsafe_allow_html=True,
+    )
+    slot_pdf = st.container()  # o botão de PDF aparece aqui, logo abaixo da saudação, quando os dados chegam
+    st.markdown(
         f'<div id="novidades"><h2 class="g-section">O que mudou</h2>'
         f'<p class="g-cap">Comparação entre a extração mais recente e a anterior de cada farmácia. O preço considerado é o menor entre o preço sem desconto e o pix, em média no dia.</p>'
         f'<p class="g-bv-legenda">↓ o preço caiu · ↑ o preço subiu</p></div>',
@@ -1902,6 +2151,17 @@ def render_boas_vindas():
                     unsafe_allow_html=True)
     if resumo is None and mudancas is None:
         st.info("Ainda não há duas extrações para comparar.")
+    else:
+        with slot_pdf:
+            try:
+                pdf_bytes = gerar_pdf_boas_vindas(saud, nome, resumo, mudancas)
+                _, c_pdf, _ = st.columns([1.3, 1, 1.3])
+                c_pdf.download_button("Baixar PDF", pdf_bytes, key="bv_pdf", type="primary", use_container_width=True,
+                                      file_name=f"boas_vindas_zids_{datetime.now():%Y-%m-%d}.pdf", mime="application/pdf")
+            except ImportError:
+                st.caption("Para baixar o PDF, instale: py -m pip install reportlab")
+            except Exception as exc:  # noqa: BLE001
+                st.caption(f"Não foi possível gerar o PDF: {exc}")
 
     c1, c2, _ = st.columns([1.4, 1.2, 4], gap="small")
     if c1.button("Conversar com o Zids", key="bv_chat", type="primary", use_container_width=True):
@@ -1957,6 +2217,8 @@ def render_insights():
         with cols[i % 2]:
             with st.container(border=True):
                 st.markdown(f'<div class="g-label">{spec["titulo"]}</div>', unsafe_allow_html=True)
+                if spec.get("descricao"):
+                    st.caption(spec["descricao"])
                 try:
                     with carregando("Consultando os dados..."):
                         r = run_insight(spec["pergunta"])
