@@ -313,6 +313,17 @@ code, pre, [data-testid="stCode"] * { font-family: var(--font-geist-mono) !impor
 .st-key-nav_chat button, .st-key-nav_insights button, .st-key-nav_dados button, .st-key-nav_theme button {
   border-radius: var(--radius-xl);
 }
+/* Texto dos botões do topo inteiro, sem ser cortado com "..." */
+/* [class*="st-key-nav_"] pega todos os botões cuja key começa com "nav_" (as abas e o de tema) */
+[class*="st-key-nav_"] button { padding: 8px 8px; min-height: 0; }  /* botões mais baixos (8px em cima e embaixo) e com menos espaço nas laterais */
+.st-key-nav_theme button { padding: 4px 8px; }  /* botão de tema ainda menor que as abas */
+.st-key-nav_theme button p { font-size: 11px; }
+.g-logo { white-space: nowrap; }  /* mantém a bolinha e o "Zids" na mesma linha */
+[class*="st-key-nav_"] button div,
+[class*="st-key-nav_"] button p { overflow: visible; text-overflow: clip; white-space: nowrap; }  /* desliga o corte com "..." */
+/* Fonte das abas encolhe um pouco em telas estreitas: no mínimo 12px, no máximo 14px */
+.st-key-nav_inicio button p, .st-key-nav_chat button p, .st-key-nav_insights button p, .st-key-nav_simulador button p,
+.st-key-nav_tendencias button p, .st-key-nav_dados button p { font-size: clamp(12px, 1vw, 14px); }
 
 /* Barra lateral de chats (retrátil): um item por conversa, o ativo em destaque */
 [data-testid="stSidebar"] { background: var(--surface-card) !important; border-right: 1px solid rgba(128,128,128,.22); }
@@ -549,7 +560,7 @@ if "page" not in st.session_state:
     st.session_state.page = "chat"
 
 # ---------- Topo: logo + botões de troca de página ----------
-c_logo, c_ini, c_chat, c_ins, c_sim, c_tend, c_dados, c_tema = st.columns([1.25, 1.3, 1.3, 1.3, 1.3, 1.4, 1.3, 0.85], vertical_alignment="center")
+c_logo, c_ini, c_chat, c_ins, c_sim, c_tend, c_dados, c_tema = st.columns([1.3, 1.2, 1.2, 1.2, 1.2, 1.3, 1.2, 0.95], vertical_alignment="center")  # logo com mais espaço, abas e botão de tema um pouco menores
 c_logo.markdown(f'<div class="g-logo"><b>●</b> {BOT_NAME}</div>', unsafe_allow_html=True)
 for col, key, label in ((c_ini, "inicio", "Boas-vindas"), (c_chat, "chat", "Chatbot"),
                         (c_ins, "insights", "Insights"), (c_sim, "simulador", "Simulador"), (c_tend, "tendencias", "Tendências"), (c_dados, "dados", "Dados")):
@@ -3287,6 +3298,16 @@ def render_tendencias():
     if vendas is None or len(vendas) < 12:
         st.info("Há poucas semanas de venda deste produto para cruzar com as buscas (mínimo de 12 semanas).")
         return
+
+    # --- portão: só consulta o Google depois que a pessoa clicar no botão ---
+    # O Streamlit reexecuta o script inteiro a cada interação (trocar produto, editar o termo etc.).
+    # Sem este portão, cada rerun chamaria o Google Trends de novo, o que provoca o erro 429.
+    chave = f"tr_ok_{termo}"  # uma marca por termo, guardada na sessão do usuário (st.session_state)
+    if not st.session_state.get(chave):  # ainda não clicou para este termo?
+        if st.button("Buscar tendência no Google", key=f"tr_go_{gtin}"):
+            st.session_state[chave] = True  # clicou: marca o termo e segue para a consulta abaixo
+        else:
+            return  # não clicou: para aqui, sem fazer nenhuma requisição ao Google
 
     # --- tendência de busca (Google Trends, com cache de 7 dias) ---
     try:
