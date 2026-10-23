@@ -1524,7 +1524,24 @@ def padronizar(df: pd.DataFrame, spec: dict):
     return d if not d.empty else None
 
 
-def grafico_fixo(d: pd.DataFrame, spec: dict):
+def dominio_variacao(valores: pd.Series) -> list:
+    """Início e fim do eixo X do gráfico de diferença de preço, com folga para os rótulos em R$ caberem."""
+    lo = min(float(valores.min()), 0.0)  # menor valor, mas nunca acima de zero (o zero sempre aparece)
+    hi = max(float(valores.max()), 0.0)  # maior valor, mas nunca abaixo de zero
+    if lo == hi:  # todos os valores iguais a zero: devolve um eixo qualquer para não quebrar
+        return [-1.0, 1.0]
+    folga = (hi - lo) * 0.45  # 45% a mais do tamanho do eixo, para o texto ao lado da barra
+    # Só põe folga no lado que tem barra (sem barras negativas, o eixo começa no zero)
+    return [lo - folga if lo < 0 else 0.0, hi + folga if hi > 0 else 0.0]
+
+
+# Formata os números do eixo no padrão brasileiro: 1,000 vira 1.000
+# format(..., ',.0f') coloca a vírgula de milhar e o replace troca TODAS as vírgulas por ponto
+EIXO_BR = "replace(format(datum.value, ',.0f'), regexp(',', 'g'), '.')"
+
+
+def grafico_fixo(d: pd.DataFrame, spec: dict, dominio=None, titulo=None, legenda=True, mostrar_eixo=True):
+    # dominio, titulo, legenda e mostrar_eixo só são usados no tipo "variacao" (um gráfico por concorrente)
     tipo, eixo = spec["tipo"], spec["eixo"]
     fonte = "Geist"
     xmax = float(d["valor"].max()) * 1.2 if len(d) else 1.0
@@ -1576,30 +1593,48 @@ def grafico_fixo(d: pd.DataFrame, spec: dict):
         )
         chart = (arco + rotulos).properties(height=300)
     elif tipo == "variacao":
+        # Gráfico de UM concorrente só. Antes era um "facet" (os dois concorrentes num gráfico só), mas
+        # facet não aceita ocupar a largura do card, por isso ficava estreito, torto e com a legenda vazando.
         d = d.copy()
-        d["abs"] = d["valor"].abs()
+        d["abs"] = d["valor"].abs()  # tamanho da diferença sem o sinal, usado só para ordenar as barras
         d["sentido"] = d["valor"].map(lambda v: "Concorrente mais caro" if v >= 0 else "Concorrente mais barato")
+        if dominio is None:  # se ninguém passou o eixo, calcula com os dados deste gráfico
+            dominio = dominio_variacao(d["valor"])
         base = alt.Chart(d).encode(
+            # Produtos no eixo Y, do maior para o menor tamanho de diferença
             y=alt.Y("rotulo:N", sort=alt.EncodingSortField(field="abs", order="descending"), title=None,
-                    axis=alt.Axis(labelLimit=200, orient="left")),
-            x=alt.X("valor:Q", title=eixo, scale=alt.Scale(padding=70)),
+                    # minExtent e maxExtent fixam a largura da coluna de nomes em 230px nos dois gráficos,
+                    # assim o zero e as barras ficam alinhados um embaixo do outro
+                    axis=alt.Axis(labelLimit=220, labelPadding=8, minExtent=230, maxExtent=230)),
+            # Eixo X com início e fim fixos (iguais nos dois concorrentes) e números no padrão brasileiro
+            x=alt.X("valor:Q", title=eixo if mostrar_eixo else None,
+                    scale=alt.Scale(domain=dominio, nice=False),
+                    axis=alt.Axis(tickCount=5, labelExpr=EIXO_BR)),
+            # Cor pelo sentido; a legenda aparece só no último gráfico, para não repetir
             color=alt.Color("sentido:N", title=None, scale=alt.Scale(
                 domain=["Concorrente mais caro", "Concorrente mais barato"], range=[PURPLE, "#c4a054"]),
-                legend=alt.Legend(orient="bottom")),
+                legend=alt.Legend(orient="bottom", direction="horizontal") if legenda else None),
             tooltip=[alt.Tooltip("grupo:N", title="Comparação"), alt.Tooltip("rotulo:N", title="Produto"),
                      alt.Tooltip("texto:N", title="Diferença")],
         )
-        pos = base.mark_text(align="left", dx=6, color=INK, font=fonte).encode(text="texto:N").transform_filter(
+        # Rótulo em R$: à direita da barra quando positiva e à esquerda quando negativa
+        pos = base.mark_text(align="left", dx=6, font=fonte).encode(text="texto:N").transform_filter(
             alt.datum.valor >= 0)
-        neg = base.mark_text(align="right", dx=-6, color=INK, font=fonte).encode(text="texto:N").transform_filter(
+        neg = base.mark_text(align="right", dx=-6, font=fonte).encode(text="texto:N").transform_filter(
             alt.datum.valor < 0)
-        chart = (
-            (base.mark_bar(cornerRadiusEnd=6) + pos + neg)
-            .properties(width=240, height=alt.Step(26))
-            .facet(facet=alt.Facet("grupo:N", title=None, header=alt.Header(labelFontWeight=600, labelFontSize=13)),
-                   columns=1)
-            .resolve_scale(y="independent")
-        )
+        # Linha vertical no zero, para ficar claro onde a barra começa
+        zero = base.mark_rule(opacity=0.5).encode(x=alt.datum(0), y=alt.value(0), y2=alt.value("height"),
+                                                  color=alt.value(MUTED))  # cor fixa, sem seguir a legenda
+        # Barras com o canto arredondado na ponta de fora: à direita nas positivas e à esquerda nas negativas
+        # (o cornerRadiusEnd de antes arredondava sempre o lado direito, que nas negativas é o lado do zero)
+        barra_pos = base.mark_bar(height=18, cornerRadiusTopRight=6, cornerRadiusBottomRight=6).transform_filter(
+            alt.datum.valor >= 0)
+        barra_neg = base.mark_bar(height=18, cornerRadiusTopLeft=6, cornerRadiusBottomLeft=6).transform_filter(
+            alt.datum.valor < 0)
+        chart = (zero + barra_pos + barra_neg + pos + neg).properties(height=alt.Step(30))
+        if titulo:  # nome da comparação (ex.: "Farmazids x VeraCruz") alinhado à esquerda, acima do gráfico
+            chart = chart.properties(title=alt.TitleParams(titulo, anchor="start", frame="bounds", font=fonte,
+                                                           fontSize=13, fontWeight=600, color=INK, offset=8))
     elif tipo == "barras_agrupadas":
         base = alt.Chart(d).encode(
             y=alt.Y("rotulo:N", sort="-x", title=None, axis=alt.Axis(labelLimit=200)),
@@ -2812,6 +2847,15 @@ def render_insights():
                 d = padronizar(bruto, spec)
                 if d is None:
                     st.info("Sem dados para este indicador no momento.")
+                elif spec["tipo"] == "variacao":
+                    # Um gráfico por concorrente, um embaixo do outro, cada um ocupando a largura do card
+                    dominio = dominio_variacao(d["valor"])  # mesmo eixo X nos dois, para dar para comparar
+                    grupos = sorted(d["grupo"].dropna().unique())  # ex.: FarmaPonte e depois VeraCruz
+                    for j, grupo in enumerate(grupos):
+                        ultimo = j == len(grupos) - 1  # legenda e título do eixo só no último gráfico
+                        st.altair_chart(grafico_fixo(d[d["grupo"] == grupo], spec, dominio=dominio, titulo=grupo,
+                                                     legenda=ultimo, mostrar_eixo=ultimo),
+                                        use_container_width=True, theme=None if DARK else "streamlit")
                 else:
                     st.altair_chart(grafico_fixo(d, spec), use_container_width=(spec["tipo"] != "barras_agrupadas"),
                                     theme=None if DARK else "streamlit")
