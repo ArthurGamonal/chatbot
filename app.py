@@ -3148,7 +3148,7 @@ def render_simulador():
                     unsafe_allow_html=True)
 
     # --- margem ---
-    st.markdown('<h2 class="g-section" style="font-size:var(--text-heading);margin-top:var(--spacing-24)">Quanto de margem se perde</h2>',
+    st.markdown('<h2 class="g-section" style="font-size:var(--text-heading);margin-top:var(--spacing-24)">Quanto a margem muda</h2>',
                 unsafe_allow_html=True)
     if r["custo"] is None:
         st.info("Informe o custo unitário (ou a margem atual) para calcular a margem e o lucro mensal.")
@@ -3158,7 +3158,7 @@ def render_simulador():
         cards = [
             _card_sim("Margem por unidade", _rs(r["m_novo_un"]), f'hoje {_rs(r["m_atual_un"])}'),
             _card_sim("Margem (%)", m_novo_pct, f'hoje {fmt_valor(r["m_atual_pct"], "pct")}'),
-            _card_sim("Margem perdida por unidade", _rs(max(r["perda_un"], 0)) if r["perda_un"] >= 0 else f'+{_rs(-r["perda_un"])}',
+            _card_sim("Variação por unidade",_rs(max(r["perda_un"], 0)) if r["perda_un"] >= 0 else f'+{_rs(-r["perda_un"])}',
                       f'{_pct_sinal(-(r["perda_un"] / r["m_atual_un"] * 100)) if r["m_atual_un"] > 0 else "—"} da margem de hoje', cls),
         ]
         if unidades > 0:
